@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mithro/go-tmux-saver/internal/config"
 	gtssetup "github.com/mithro/go-tmux-saver/internal/setup"
@@ -17,7 +18,7 @@ import (
 // calling test, restoring the real implementation via t.Cleanup. Every
 // test in this file that must not touch the real system uses this — none
 // of them may let a real systemctl/systemd-analyze/tmux process run.
-func withFakeExecCommand(t *testing.T, fn func(name string, args ...string) ([]byte, error)) {
+func withFakeExecCommand(t *testing.T, fn func(timeout time.Duration, name string, args ...string) ([]byte, error)) {
 	t.Helper()
 	orig := execCommand
 	execCommand = fn
@@ -45,15 +46,17 @@ func TestResolveBinary(t *testing.T) {
 }
 
 // (b) realSystemctl's dispatch: a "verify" call goes to `systemd-analyze`,
-// everything else goes to `systemctl` — both with the same args.
+// everything else goes to `systemctl` — both with the same args — and every
+// call (RULING R33) observes the 15s setup-path timeout.
 func TestRealSystemctlDispatchesVerifyToSystemdAnalyze(t *testing.T) {
 	type call struct {
-		name string
-		args []string
+		timeout time.Duration
+		name    string
+		args    []string
 	}
 	var calls []call
-	withFakeExecCommand(t, func(name string, args ...string) ([]byte, error) {
-		calls = append(calls, call{name, append([]string(nil), args...)})
+	withFakeExecCommand(t, func(timeout time.Duration, name string, args ...string) ([]byte, error) {
+		calls = append(calls, call{timeout, name, append([]string(nil), args...)})
 		return []byte("ok\n"), nil
 	})
 
@@ -88,19 +91,27 @@ func TestRealSystemctlDispatchesVerifyToSystemdAnalyze(t *testing.T) {
 	if calls[2].name != "systemctl" {
 		t.Errorf("daemon-reload dispatched to %q, want systemctl", calls[2].name)
 	}
+
+	for i, c := range calls {
+		if c.timeout != setupExecTimeout {
+			t.Errorf("calls[%d] (%s) timeout = %v, want the setup-path timeout %v", i, c.name, c.timeout, setupExecTimeout)
+		}
+	}
 }
 
 // realTmuxBindings must dispatch to `tmux -L <socket> list-keys` via the
 // same execCommand seam (covered alongside realSystemctl's dispatch test
-// since both back Env's injectables).
+// since both back Env's injectables), observing the 15s setup-path timeout
+// (RULING R33).
 func TestRealTmuxBindingsDispatch(t *testing.T) {
 	type call struct {
-		name string
-		args []string
+		timeout time.Duration
+		name    string
+		args    []string
 	}
 	var calls []call
-	withFakeExecCommand(t, func(name string, args ...string) ([]byte, error) {
-		calls = append(calls, call{name, append([]string(nil), args...)})
+	withFakeExecCommand(t, func(timeout time.Duration, name string, args ...string) ([]byte, error) {
+		calls = append(calls, call{timeout, name, append([]string(nil), args...)})
 		return []byte("bind-key -T prefix M-s run-shell \"go-tmux-saver save\"\n"), nil
 	})
 
@@ -118,6 +129,9 @@ func TestRealTmuxBindingsDispatch(t *testing.T) {
 	if got, want := strings.Join(calls[0].args, " "), "-L main list-keys"; got != want {
 		t.Errorf("tmux args = %q, want %q", got, want)
 	}
+	if calls[0].timeout != setupExecTimeout {
+		t.Errorf("tmux call timeout = %v, want the setup-path timeout %v", calls[0].timeout, setupExecTimeout)
+	}
 }
 
 // mustLoadDefaultConfig is a small helper for tests that only need a
@@ -134,20 +148,34 @@ func mustLoadDefaultConfig(t *testing.T, socket string) config.Config {
 
 // (c) timerState (wired to realTimerState by setup.go's init) reports
 // "unknown" when the injected exec fails, and the trimmed exec output
-// otherwise.
+// otherwise — and (RULING R33) it must request the short 3s
+// timerStateExecTimeout, not the 15s setup-path bound, so `status` can't
+// block long on a hung systemd.
 func TestTimerStateViaExecCommand(t *testing.T) {
-	withFakeExecCommand(t, func(name string, args ...string) ([]byte, error) {
+	var gotTimeout time.Duration
+	withFakeExecCommand(t, func(timeout time.Duration, name string, args ...string) ([]byte, error) {
+		gotTimeout = timeout
 		return nil, errors.New("boom")
 	})
 	if got := timerState(); got != "unknown" {
 		t.Fatalf("timerState() on exec error = %q, want %q", got, "unknown")
 	}
+	if gotTimeout != timerStateExecTimeout {
+		t.Fatalf("timerState() used timeout %v, want the 3s timerStateExecTimeout %v", gotTimeout, timerStateExecTimeout)
+	}
 
-	withFakeExecCommand(t, func(name string, args ...string) ([]byte, error) {
+	withFakeExecCommand(t, func(timeout time.Duration, name string, args ...string) ([]byte, error) {
+		gotTimeout = timeout
 		return []byte("active\n"), nil
 	})
 	if got := timerState(); got != "active" {
 		t.Fatalf("timerState() = %q, want %q", got, "active")
+	}
+	if gotTimeout != timerStateExecTimeout {
+		t.Fatalf("timerState() used timeout %v, want the 3s timerStateExecTimeout %v", gotTimeout, timerStateExecTimeout)
+	}
+	if gotTimeout == setupExecTimeout {
+		t.Fatalf("timerState() must not use the setup-path timeout %v", setupExecTimeout)
 	}
 }
 
@@ -156,7 +184,7 @@ func TestTimerStateViaExecCommand(t *testing.T) {
 // real systemd/tmux state even when run against a real ConfigHome.
 func TestSetupGenerateCLIWritesFilesWithNoExecCalls(t *testing.T) {
 	execCalls := 0
-	withFakeExecCommand(t, func(name string, args ...string) ([]byte, error) {
+	withFakeExecCommand(t, func(timeout time.Duration, name string, args ...string) ([]byte, error) {
 		execCalls++
 		return nil, fmt.Errorf("execCommand must not be called by `setup generate`: %s %v", name, args)
 	})

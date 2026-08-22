@@ -38,20 +38,29 @@ func resolveBinary() (string, error) {
 	return real, nil
 }
 
-// execTimeout bounds every real process execCommand runs (systemctl,
-// systemd-analyze, tmux list-keys). One shared bound keeps the seam's
-// signature exactly `func(name string, args ...string) ([]byte, error)` —
-// no per-call context parameter — at the cost of using the same timeout for
-// both the interactive `setup` subcommands and status's quick timer check.
-const execTimeout = 15 * time.Second
+// RULING R33: execCommand takes an explicit per-call timeout rather than
+// baking in one shared bound — status's timerState must stay responsive
+// (bounded at timerStateExecTimeout) even when a user systemd instance is
+// hung or unreachable, independent of the more generous bound the
+// interactive `setup` subcommands get (they can involve slower systemd
+// operations, e.g. daemon-reload).
+const (
+	// setupExecTimeout bounds realSystemctl/realTmuxBindings — every
+	// systemctl/systemd-analyze/tmux call `setup install|validate|update`
+	// make.
+	setupExecTimeout = 15 * time.Second
+	// timerStateExecTimeout bounds realTimerState's `systemctl --user
+	// is-active` check — `status` must not block long on a hung systemd.
+	timerStateExecTimeout = 3 * time.Second
+)
 
 // execCommand is the seam every real subprocess call in this file goes
-// through: run name(args...) to completion and return its combined
-// stdout+stderr. Tests swap this package var for a fake to assert dispatch
-// (systemctl vs. systemd-analyze, tmux list-keys, `systemctl --user
-// is-active` for timerState) without touching the real system.
-var execCommand = func(name string, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
+// through: run name(args...) to completion, bounded by timeout, and return
+// its combined stdout+stderr. Tests swap this package var for a fake to
+// assert both dispatch (systemctl vs. systemd-analyze, tmux list-keys) and
+// the timeout each call site requests, without touching the real system.
+var execCommand = func(timeout time.Duration, name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
 }
@@ -67,7 +76,7 @@ func realSystemctl(args ...string) (string, error) {
 	if len(args) >= 2 && args[1] == "verify" {
 		bin = "systemd-analyze"
 	}
-	out, err := execCommand(bin, args...)
+	out, err := execCommand(setupExecTimeout, bin, args...)
 	if err != nil {
 		return string(out), fmt.Errorf("%s %s: %w", bin, strings.Join(args, " "), err)
 	}
@@ -78,7 +87,7 @@ func realSystemctl(args ...string) (string, error) {
 // key bindings from cfg's tmux socket.
 func realTmuxBindings(cfg config.Config) func() (string, error) {
 	return func() (string, error) {
-		out, err := execCommand("tmux", "-L", cfg.Socket, "list-keys")
+		out, err := execCommand(setupExecTimeout, "tmux", "-L", cfg.Socket, "list-keys")
 		if err != nil {
 			return string(out), fmt.Errorf("tmux -L %s list-keys: %w", cfg.Socket, err)
 		}
@@ -246,12 +255,13 @@ func runSetupUpdate(args []string, stdout, stderr io.Writer) int {
 
 // realTimerState is status.go's timerState replacement: the live
 // `systemctl --user is-active go-tmux-saver.timer` state, via execCommand
-// so tests can fake it. Any exec failure (systemctl missing, no user
-// systemd instance, timeout, non-zero exit for e.g. "inactive"/"failed"
-// reported as an error by is-active) reports "unknown" rather than
-// propagating an error status has no way to show.
+// (bounded at timerStateExecTimeout, RULING R33) so tests can fake it. Any
+// exec failure (systemctl missing, no user systemd instance, timeout,
+// non-zero exit for e.g. "inactive"/"failed" reported as an error by
+// is-active) reports "unknown" rather than propagating an error status has
+// no way to show.
 func realTimerState() string {
-	out, err := execCommand("systemctl", "--user", "is-active", "go-tmux-saver.timer")
+	out, err := execCommand(timerStateExecTimeout, "systemctl", "--user", "is-active", "go-tmux-saver.timer")
 	if err != nil {
 		return "unknown"
 	}
