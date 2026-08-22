@@ -42,6 +42,17 @@ func (s *sentMail) count() int {
 	return len(s.bodies)
 }
 
+// all returns every message sent so far, in order.
+func (s *sentMail) all() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.bodies))
+	for i, b := range s.bodies {
+		out[i] = string(b)
+	}
+	return out
+}
+
 func (s *sentMail) last() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

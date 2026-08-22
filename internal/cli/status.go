@@ -142,6 +142,23 @@ func init() {
 			return code
 		}
 
-		return RunStatus(stdout, store.Dir, cfg, *asJSON, *checkFresh, *n, time.Now())
+		rc := RunStatus(stdout, store.Dir, cfg, *asJSON, *checkFresh, *n, time.Now())
+
+		// RULING R46: this is the watch unit's own success path — a
+		// --check-fresh run that finds the last good save fresh. Ending the
+		// watch unit's failure streak here (and mailing one recovery per
+		// cleared marker) is what stops the watchdog going permanently
+		// silent after its first staleness alert. Only --check-fresh does
+		// this: a plain `status` is a read-only query.
+		if *checkFresh && rc == 0 {
+			host, err := os.Hostname()
+			if err != nil {
+				host = "unknown-host"
+			}
+			for _, err := range clearAlertsAndNotify(store.Dir, host, cfg.MailTo, alertBody(store.Dir, cfg, 20), []string{watchAlertUnit}) {
+				fmt.Fprintln(stderr, "alert: recovery mail:", err)
+			}
+		}
+		return rc
 	}})
 }

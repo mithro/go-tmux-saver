@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mithro/go-tmux-saver/internal/config"
+	"github.com/mithro/go-tmux-saver/internal/mail"
 	"github.com/mithro/go-tmux-saver/internal/snapshot"
 )
 
@@ -179,5 +180,62 @@ func TestRunStatusDirect(t *testing.T) {
 	code = RunStatus(&out, dataDir, cfg, false, true, 10, lastGood)
 	if code != 0 {
 		t.Fatalf("RunStatus at lastGood itself = %d, want 0; out=%q", code, out.String())
+	}
+}
+
+// TestStatusCheckFreshClearsWatchMarker covers C3/RULING R46's second half:
+// a NON-stale `status --check-fresh` (the watch unit's own success path)
+// clears the watch unit's alert marker and mails one recovery, through the
+// same injectable sender the alert subcommand uses. A stale run must clear
+// nothing.
+func TestStatusCheckFreshClearsWatchMarker(t *testing.T) {
+	s := fakeSendmail(t)
+	dataDir := t.TempDir()
+	cfgPath := writeConfig(t, `{"mail_to": "ops@example.com"}`)
+	marker := filepath.Join(dataDir, "alert-"+watchAlertUnit)
+
+	rl := mail.RateLimiter{Dir: dataDir}
+	if !rl.ShouldSend(watchAlertUnit, time.Now()) {
+		t.Fatal("setup: ShouldSend = false, want true (fresh marker)")
+	}
+
+	// Stale (no fresh marker at all): exit 1, and the alert marker survives.
+	var out, errb bytes.Buffer
+	if code := Run([]string{"status", "--check-fresh", "--config", cfgPath, "--data-dir", dataDir}, &out, &errb); code != 1 {
+		t.Fatalf("stale exit %d, want 1", code)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("a STALE check must not clear the marker: %v", err)
+	}
+	if s.count() != 0 {
+		t.Fatalf("sendmail calls on the stale path = %d, want 0", s.count())
+	}
+
+	// Fresh: exit 0, marker cleared, exactly one recovery mail.
+	if err := snapshot.TouchFresh(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"status", "--check-fresh", "--config", cfgPath, "--data-dir", dataDir}, &out, &errb); code != 0 {
+		t.Fatalf("fresh exit %d, want 0; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("fresh --check-fresh must clear the watch marker (stat err = %v)", err)
+	}
+	if s.count() != 1 {
+		t.Fatalf("sendmail calls = %d, want 1", s.count())
+	}
+	if !strings.Contains(s.last(), watchAlertUnit+" recovered") || !strings.Contains(s.last(), "To: ops@example.com") {
+		t.Fatalf("message = %q, want a recovered subject for %s to ops@example.com", s.last(), watchAlertUnit)
+	}
+
+	// A second fresh run has no marker to clear, so it must stay silent.
+	out.Reset()
+	if code := Run([]string{"status", "--check-fresh", "--config", cfgPath, "--data-dir", dataDir}, &out, &errb); code != 0 {
+		t.Fatalf("second fresh exit %d, want 0", code)
+	}
+	if s.count() != 1 {
+		t.Fatalf("sendmail calls after a second fresh run = %d, want still 1", s.count())
 	}
 }

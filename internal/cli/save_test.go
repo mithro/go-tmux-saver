@@ -234,3 +234,47 @@ func TestSaveCLIAutoSuccessSendsRecoveryMailWhenMarkerPresent(t *testing.T) {
 		t.Fatalf("sendmail calls after second save = %d, want still 1 (no marker to clear)", s.count())
 	}
 }
+
+// TestSaveCLIAutoSuccessClearsWatchMarkerToo covers C3/RULING R46: the
+// watch unit's alert marker was never cleared by anything, so after the
+// first staleness mail the watchdog went permanently silent. A successful
+// `save --auto` now clears BOTH unit markers and sends one recovery mail
+// per marker that existed — and, the marker being gone, the NEXT failure
+// streak for the watch unit mails again instead of being rate-limited
+// forever.
+func TestSaveCLIAutoSuccessClearsWatchMarkerToo(t *testing.T) {
+	s := fakeSendmail(t)
+	sock := tmuxctl.StartTestServer(t)
+	cfgPath := writeConfig(t, `{"mail_to": "ops@example.com"}`)
+	dataDir := t.TempDir()
+
+	rl := mail.RateLimiter{Dir: dataDir}
+	for _, unit := range []string{alertUnit, watchAlertUnit} {
+		if !rl.ShouldSend(unit, time.Now()) {
+			t.Fatalf("setup: ShouldSend(%s) = false, want true (fresh marker)", unit)
+		}
+	}
+
+	var out, errb bytes.Buffer
+	code := Run([]string{"save", "--auto", "--no-display", "--config", cfgPath, "--data-dir", dataDir, "--socket", sock}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	if s.count() != 2 {
+		t.Fatalf("sendmail calls = %d, want 2 (one recovery per cleared marker); bodies=%q", s.count(), s.all())
+	}
+	joined := strings.Join(s.all(), "\n")
+	for _, unit := range []string{alertUnit, watchAlertUnit} {
+		if !strings.Contains(joined, unit+" recovered") {
+			t.Errorf("no recovery mail for %s in:\n%s", unit, joined)
+		}
+		if _, err := os.Stat(filepath.Join(dataDir, "alert-"+unit)); !os.IsNotExist(err) {
+			t.Errorf("marker for %s still present (stat err = %v)", unit, err)
+		}
+	}
+
+	// Marker gone ⇒ the next watch failure is not rate-limited any more.
+	if !rl.ShouldSend(watchAlertUnit, time.Now()) {
+		t.Fatalf("ShouldSend(%s) after a successful save = false; the watchdog would stay silent forever", watchAlertUnit)
+	}
+}

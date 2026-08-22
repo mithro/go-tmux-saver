@@ -18,10 +18,42 @@ import (
 	"github.com/mithro/go-tmux-saver/internal/trace"
 )
 
-// alertUnit is the systemd unit name go-tmux-saver-alert@.service is
-// instantiated with for the save/watch services (see the Task 16 templates)
-// and thus the RateLimiter key a save --auto success must clear.
-const alertUnit = "go-tmux-saver.service"
+// alertUnit and watchAlertUnit are the systemd unit names
+// go-tmux-saver-alert@.service is instantiated with (see the Task 16
+// templates), and thus the RateLimiter keys a success must clear.
+//
+// RULING R46: a successful save clears BOTH. Nothing else ever cleared the
+// watch unit's marker — `status --check-fresh` didn't, and the watch unit
+// only ever runs the alert on FAILURE — so after the first staleness mail
+// the watchdog stayed rate-limited forever and never mailed again. A save
+// succeeding is exactly the condition the watch unit tests for, so it ends
+// that streak too.
+const (
+	alertUnit      = "go-tmux-saver.service"
+	watchAlertUnit = "go-tmux-saver-watch.service"
+)
+
+// alertUnits is the full set of units whose alert markers a success clears.
+var alertUnits = []string{alertUnit, watchAlertUnit}
+
+// clearAlertsAndNotify clears each unit's rate-limit marker under dataDir
+// and sends exactly one recovery mail for every marker that actually
+// existed. Sending is best-effort: a sendmail failure is returned for the
+// caller to log, never turned into a non-zero exit — the operation that
+// triggered the recovery already succeeded.
+func clearAlertsAndNotify(dataDir, host, mailTo, body string, units []string) []error {
+	rl := mail.RateLimiter{Dir: dataDir}
+	var errs []error
+	for _, u := range units {
+		if !rl.Clear(u) {
+			continue
+		}
+		if err := mail.Send(mail.Sendmail, mailTo, mail.Subject(host, u, true), body); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", u, err))
+		}
+	}
+	return errs
+}
 
 // SaveDeps bundles everything RunSave needs so it can be driven by real tmux
 // state (the "save" subcommand below) or by a tmuxctl.Fake (tests).
@@ -205,15 +237,8 @@ func init() {
 		fmt.Fprintln(stdout, summary)
 
 		if *auto && (o.Kind == "kept" || o.Kind == "unchanged") {
-			rl := mail.RateLimiter{Dir: store.Dir}
-			if rl.Clear(alertUnit) {
-				subject := mail.Subject(host, alertUnit, true)
-				body := "save succeeded: " + summary
-				// A sendmail failure here must not change the save's own
-				// exit code — the save already succeeded; log and move on.
-				if err := mail.Send(mail.Sendmail, cfg.MailTo, subject, body); err != nil {
-					fmt.Fprintln(stderr, "alert: recovery mail:", err)
-				}
+			for _, err := range clearAlertsAndNotify(store.Dir, host, cfg.MailTo, "save succeeded: "+summary, alertUnits) {
+				fmt.Fprintln(stderr, "alert: recovery mail:", err)
 			}
 		}
 		return 0
