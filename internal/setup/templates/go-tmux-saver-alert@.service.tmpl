@@ -1,0 +1,6 @@
+{{.Header}}[Unit]
+Description=go-tmux-saver alert for %i
+
+[Service]
+Type=oneshot
+ExecStart={{.Binary}} alert --unit %i

@@ -1,0 +1,11 @@
+{{.Header}}[Unit]
+Description=go-tmux-saver periodic snapshot timer
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec={{.IntervalMinutes}}min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

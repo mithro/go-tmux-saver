@@ -1,0 +1,8 @@
+{{.Header}}# M-s saves in the background (run-shell -b): a save is dominated by tmux's
+# own capture-pane cost (~3.5s on a 41-pane server), and a foreground
+# run-shell would block the server for that whole time. The save still
+# reports itself with display-message when it finishes.
+bind-key M-s run-shell -b "{{.Binary}} save"
+# M-r stays in the foreground: it mutates the server, so the user wants the
+# result before touching anything else.
+bind-key M-r run-shell "{{.Binary}} restore --merge"

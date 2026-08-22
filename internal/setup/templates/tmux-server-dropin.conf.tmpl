@@ -1,0 +1,6 @@
+{{.Header}}[Service]
+# The '-' prefix makes systemd ignore a non-zero exit here (RULING R45): a
+# restore problem must never leave tmux-server.service itself in the failed
+# state. go-tmux-saver already downgrades "nothing to restore yet" and a
+# partial restore to exit 0 under --on-start; this covers the rest.
+ExecStartPost=-{{.Binary}} restore --on-start
