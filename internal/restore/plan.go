@@ -74,12 +74,16 @@ func cwdOrHome(cwd string) string {
 	return h
 }
 
-// firstCwd returns panes[0].Cwd, or "" if there are no panes.
+// firstCwd returns cwdOrHome(panes[0].Cwd), or "" if there are no panes.
+// Every pane's cwd — including the first pane used on the
+// new-session/new-window line — goes through the same missing-directory
+// fallback: a new-session/new-window with a nonexistent -c fails in tmux
+// just as surely as a split-window would.
 func firstCwd(panes []snapshot.Pane) string {
 	if len(panes) == 0 {
 		return ""
 	}
-	return panes[0].Cwd
+	return cwdOrHome(panes[0].Cwd)
 }
 
 // BuildPlan is a pure function: given the live server state, a saved
@@ -140,7 +144,7 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 					target = fmt.Sprintf("%s:%s", sess.Name, WinPlaceholder)
 					created = true
 					relocated = true
-					plan.tmux(fmt.Sprintf(`new-window -d -t %s: -n %s -c %s -P -F "#{window_index}"`, sess.Name, win.Name, cwd0), "relocated")
+					plan.tmux(fmt.Sprintf(`new-window -d -P -F "#{window_index}" -t %s: -n %s -c %s`, sess.Name, win.Name, cwd0), "relocated")
 				}
 			}
 

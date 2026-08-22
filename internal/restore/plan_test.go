@@ -10,12 +10,12 @@ import (
 func snapNet() *snapshot.Snapshot {
 	return &snapshot.Snapshot{Sessions: []snapshot.Session{
 		{Name: "default", ActiveWindow: 1, Windows: []snapshot.Window{
-			{Index: 0, Name: "h", Layout: "L0", Panes: []snapshot.Pane{{Index: 0, Cwd: "/home/tim", Restore: snapshot.Restore{Kind: "shell"}}}},
-			{Index: 1, Name: "rcfiles", Layout: "L1", AutomaticRename: false, Panes: []snapshot.Pane{{Index: 0, Cwd: "/home/tim/rcfiles", Active: true, Restore: snapshot.Restore{Kind: "claude", ClaudeSession: "abc"}}}},
+			{Index: 0, Name: "h", Layout: "L0", Panes: []snapshot.Pane{{Index: 0, Cwd: "/tmp", Restore: snapshot.Restore{Kind: "shell"}}}},
+			{Index: 1, Name: "rcfiles", Layout: "L1", AutomaticRename: false, Panes: []snapshot.Pane{{Index: 0, Cwd: "/tmp", Active: true, Restore: snapshot.Restore{Kind: "claude", ClaudeSession: "abc"}}}},
 		}},
 		{Name: "net", ActiveWindow: 0, Windows: []snapshot.Window{
 			{Index: 0, Name: "swcfg", Layout: "L2", Panes: []snapshot.Pane{
-				{Index: 0, Cwd: "/home/tim/net", Active: true, Restore: snapshot.Restore{Kind: "argv", Argv: []string{"ssh", "sw it's"}}},
+				{Index: 0, Cwd: "/", Active: true, Restore: snapshot.Restore{Kind: "argv", Argv: []string{"ssh", "sw it's"}}},
 				{Index: 1, Cwd: "/nonexistent/dir", Restore: snapshot.Restore{Kind: "shell"}}}}}},
 	}}
 }
@@ -39,8 +39,8 @@ func TestPlanOnSeedServer(t *testing.T) {
 	p := BuildPlan(live, snapNet(), Options{ClaudeResumePath: "/home/tim/bin/claude-resume", Contents: true, SeedSession: "default", SeedWindow: "h"})
 	cmds := strings.Join(flatten(p), "\n")
 	for _, want := range []string{
-		"new-window -d -t default:1 -n rcfiles -c /home/tim/rcfiles",
-		"new-session -d -s net -n swcfg -c /home/tim/net",
+		"new-window -d -t default:1 -n rcfiles -c /tmp",
+		"new-session -d -s net -n swcfg -c /",
 		"split-window -d -t net:0 -c /home/tim", // missing cwd → $HOME fallback (HOME=/home/tim in test via t.Setenv)
 		`select-layout -t net:0 "L2"`,
 		`send-keys -t net:0.0 'ssh' 'sw it'\''s' Enter`,
@@ -67,7 +67,7 @@ func TestPlanRelocatesOnConflict(t *testing.T) {
 	if strings.Contains(cmds, "rename-window -t default:1") || strings.Contains(cmds, "new-window -d -t default:1 ") {
 		t.Fatalf("must never touch occupied window default:1\n%s", cmds)
 	}
-	if !strings.Contains(cmds, "new-window -d -t default: -n rcfiles") || p.Relocated != 1 {
+	if !strings.Contains(cmds, `new-window -d -P -F "#{window_index}" -t default: -n rcfiles -c /tmp`) || p.Relocated != 1 {
 		t.Fatalf("expected relocation\n%s %+v", cmds, p)
 	}
 }
