@@ -82,9 +82,11 @@ func (f *fakeSystemctl) run(args ...string) (string, error) {
 	}
 }
 
+// fakeTmuxBindingsOK mimics `tmux list-keys` output for a correctly
+// installed setup: M-s bound with run-shell -b (background), M-r foreground.
 func fakeTmuxBindingsOK() (string, error) {
 	return "" +
-		"bind-key    -T prefix     M-s  run-shell \"go-tmux-saver save\"\n" +
+		"bind-key    -T prefix     M-s  run-shell -b \"go-tmux-saver save\"\n" +
 		"bind-key    -T prefix     M-r  run-shell \"go-tmux-saver restore --merge\"\n", nil
 }
 
@@ -158,6 +160,28 @@ func TestRenderGolden(t *testing.T) {
 	}
 	if !bytes.Contains(timer.Content, []byte("OnUnitActiveSec=10min")) {
 		t.Errorf("%s content = %s, want OnUnitActiveSec=10min", RelTimer, timer.Content)
+	}
+
+	// The key bindings are pinned exactly: M-s must be backgrounded with
+	// `run-shell -b` (a save takes seconds, dominated by tmux's own
+	// capture-pane cost, and must never block the server), M-r must stay
+	// foreground so the user sees the result of a mutating restore.
+	var tmuxConf Managed
+	for _, f := range files {
+		if f.Rel == RelTmuxConf {
+			tmuxConf = f
+		}
+	}
+	for _, want := range []string{
+		"bind-key M-s run-shell -b \"/usr/bin/go-tmux-saver save\"\n",
+		"bind-key M-r run-shell \"/usr/bin/go-tmux-saver restore --merge\"\n",
+	} {
+		if !bytes.Contains(tmuxConf.Content, []byte(want)) {
+			t.Errorf("%s content = %s, want it to contain %q", RelTmuxConf, tmuxConf.Content, want)
+		}
+	}
+	if bytes.Contains(tmuxConf.Content, []byte("bind-key M-r run-shell -b")) {
+		t.Errorf("%s: M-r must stay in the foreground:\n%s", RelTmuxConf, tmuxConf.Content)
 	}
 }
 
@@ -480,7 +504,7 @@ func TestValidateKeybindingMissingDrift(t *testing.T) {
 	fake := &fakeSystemctl{}
 	env := testEnv(home, fake)
 	env.TmuxBindings = func() (string, error) {
-		return "bind-key    -T prefix     M-s  run-shell \"go-tmux-saver save\"\n", nil // no M-r line
+		return "bind-key    -T prefix     M-s  run-shell -b \"go-tmux-saver save\"\n", nil // no M-r line
 	}
 	if err := Install(env, files); err != nil {
 		t.Fatalf("Install: %v", err)
@@ -492,6 +516,64 @@ func TestValidateKeybindingMissingDrift(t *testing.T) {
 	}
 	if drifts[0].Kind != "keybinding-missing" || drifts[0].Path != RelTmuxConf {
 		t.Fatalf("Validate drift = %+v, want {Path: %s, Kind: keybinding-missing}", drifts[0], RelTmuxConf)
+	}
+}
+
+// Key-binding validation must accept the bindings exactly as tmux
+// `list-keys` prints them once installed — M-s backgrounded with
+// `run-shell -b`, M-r foreground, both with the absolute binary path — and
+// must still reject the ways they can genuinely be wrong.
+func TestValidateKeyBindingsAcceptsListKeysShapes(t *testing.T) {
+	const installed = "" +
+		"bind-key -T prefix M-s run-shell -b \"/usr/bin/go-tmux-saver save\"\n" +
+		"bind-key -T prefix M-r run-shell \"/usr/bin/go-tmux-saver restore --merge\"\n"
+
+	tests := []struct {
+		name      string
+		out       string
+		err       error
+		wantDrift bool
+	}{
+		{"installed (M-s backgrounded, M-r foreground)", installed, nil, false},
+		{
+			"legacy foreground M-s still accepted",
+			"bind-key -T prefix M-s run-shell \"/usr/bin/go-tmux-saver save\"\n" +
+				"bind-key -T prefix M-r run-shell \"/usr/bin/go-tmux-saver restore --merge\"\n",
+			nil, false,
+		},
+		{
+			"extra unrelated bindings and padding",
+			"bind-key -T prefix c new-window\n" +
+				"bind-key    -T prefix     M-s   run-shell -b \"go-tmux-saver save\"\n" +
+				"bind-key    -T prefix     M-r   run-shell \"go-tmux-saver restore --merge\"\n",
+			nil, false,
+		},
+		{"M-r missing", "bind-key -T prefix M-s run-shell -b \"/usr/bin/go-tmux-saver save\"\n", nil, true},
+		{"M-s missing", "bind-key -T prefix M-r run-shell \"/usr/bin/go-tmux-saver restore --merge\"\n", nil, true},
+		{"nothing bound", "bind-key -T prefix c new-window\n", nil, true},
+		{
+			// The key and the command must be on the SAME line: M-s bound to
+			// something else, with the save hung off another key, is drift.
+			"key and command on different lines",
+			"bind-key -T prefix M-s display-message \"nope\"\n" +
+				"bind-key -T prefix M-x run-shell -b \"/usr/bin/go-tmux-saver save\"\n" +
+				"bind-key -T prefix M-r run-shell \"/usr/bin/go-tmux-saver restore --merge\"\n",
+			nil, true,
+		},
+		{"tmux unavailable", installed, errors.New("no server running"), true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := Env{TmuxBindings: func() (string, error) { return tc.out, tc.err }}
+			drift, got := validateKeyBindings(env)
+			if got != tc.wantDrift {
+				t.Fatalf("validateKeyBindings() drift = %v (%+v), want %v", got, drift, tc.wantDrift)
+			}
+			if got && (drift.Kind != "keybinding-missing" || drift.Path != RelTmuxConf) {
+				t.Fatalf("drift = %+v, want {Path: %s, Kind: keybinding-missing}", drift, RelTmuxConf)
+			}
+		})
 	}
 }
 

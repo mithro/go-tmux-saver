@@ -112,7 +112,7 @@ func TestRealTmuxBindingsDispatch(t *testing.T) {
 	var calls []call
 	withFakeExecCommand(t, func(timeout time.Duration, name string, args ...string) ([]byte, error) {
 		calls = append(calls, call{timeout, name, append([]string(nil), args...)})
-		return []byte("bind-key -T prefix M-s run-shell \"go-tmux-saver save\"\n"), nil
+		return []byte("bind-key -T prefix M-s run-shell -b \"go-tmux-saver save\"\n"), nil
 	})
 
 	bindings := realTmuxBindings(mustLoadDefaultConfig(t, "main"))
