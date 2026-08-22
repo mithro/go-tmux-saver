@@ -15,6 +15,7 @@ import (
 	"github.com/mithro/go-tmux-saver/internal/procs"
 	"github.com/mithro/go-tmux-saver/internal/snapshot"
 	"github.com/mithro/go-tmux-saver/internal/tmuxctl"
+	"github.com/mithro/go-tmux-saver/internal/trace"
 )
 
 // alertUnit is the systemd unit name go-tmux-saver-alert@.service is
@@ -59,7 +60,9 @@ func RunSave(ctx context.Context, d SaveDeps) (Outcome, error) {
 	}
 
 	c := &collect.Collector{T: d.T, Procs: d.Procs, Reg: d.Reg, Allowlist: d.Cfg.Allowlist, Host: d.Host}
+	stop := trace.Time("save.collect")
 	snap, contents, err := c.Collect(ctx)
+	stop()
 	if err != nil {
 		logEv("error", nil, "", err.Error())
 		return Outcome{Kind: "error"}, err
@@ -69,11 +72,16 @@ func RunSave(ctx context.Context, d SaveDeps) (Outcome, error) {
 	}
 	newPanes, _ := snap.CountPanes()
 
+	stop = trace.Time("save.last")
 	last, _, lerr := d.Store.Last()
+	stop()
 	lastPanes := 0
 	if lerr == nil {
 		lastPanes, _ = last.CountPanes()
-		if collect.Unchanged(last, snap) {
+		stop = trace.Time("save.unchanged")
+		same := collect.Unchanged(last, snap)
+		stop()
+		if same {
 			snapshot.TouchFresh(d.Store.Dir)
 			logEv("unchanged", snap, "", "")
 			d.Display(fmt.Sprintf("unchanged (%d panes)", newPanes))
@@ -81,7 +89,9 @@ func RunSave(ctx context.Context, d SaveDeps) (Outcome, error) {
 		}
 	}
 
+	stop = trace.Time("save.stage")
 	stg, err := d.Store.Stage(snap, contents)
+	stop()
 	if err != nil {
 		logEv("error", snap, "", err.Error())
 		return Outcome{Kind: "error"}, err
@@ -99,7 +109,9 @@ func RunSave(ctx context.Context, d SaveDeps) (Outcome, error) {
 		return Outcome{Kind: "rejected-degenerate", Dir: dir, Panes: newPanes, LastPanes: lastPanes, Duration: time.Since(start)}, nil
 	}
 
+	stop = trace.Time("save.promote")
 	dir, err := stg.Promote()
+	stop()
 	if err != nil {
 		stg.Discard()
 		logEv("error", snap, "", err.Error())
@@ -138,7 +150,9 @@ func init() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 
+		stop := trace.Time("cmd.dial")
 		tr, err := openTransport(ctx, cfg)
+		stop()
 		if err != nil {
 			if *auto && isNoServer(err) {
 				snapshot.AppendEvent(store.Dir, snapshot.Event{Time: time.Now(), Outcome: "skipped", Detail: "no server"})
@@ -153,7 +167,9 @@ func init() {
 		}
 		defer tr.Close()
 
+		stop = trace.Time("cmd.procs-scan")
 		tb, err := procs.Scan("/proc")
+		stop()
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
@@ -164,12 +180,16 @@ func init() {
 		}
 		home, _ := os.UserHomeDir()
 
+		stop = trace.Time("cmd.list-clients")
+		clients := countClients(ctx, tr)
+		stop()
+
 		d := SaveDeps{
 			T: tr, Store: store, Procs: tb,
 			Reg:     procs.ClaudeRegistry{Dir: filepath.Join(home, ".claude", "sessions")},
 			Cfg:     cfg,
 			Host:    host,
-			Clients: countClients(ctx, tr),
+			Clients: clients,
 			Display: func(string) {},
 		}
 		if !*noDisplay {

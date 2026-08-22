@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/mithro/go-tmux-saver/internal/trace"
 )
 
 // Client is a live control-mode connection to one tmux server.
@@ -45,9 +47,13 @@ var ErrDesynced = errors.New("control connection desynchronised after a cancelle
 // server) to detect and report that case cleanly, without ever spawning the
 // real control-mode client.
 func Dial(ctx context.Context, socket, session string) (*Client, error) {
-	if msg, ok := noServerRunning(ctx, socket, session); ok {
+	stop := trace.Time("dial.has-session")
+	msg, noServer := noServerRunning(ctx, socket, session)
+	stop()
+	if noServer {
 		return nil, fmt.Errorf("no server running on socket %s: %s", socket, msg)
 	}
+	defer trace.Time("dial.attach")()
 	cmd := exec.Command("tmux", "-L", socket, "-C", "attach-session", "-f", "no-output", "-t", session)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

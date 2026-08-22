@@ -12,6 +12,7 @@ import (
 	"github.com/mithro/go-tmux-saver/internal/procs"
 	"github.com/mithro/go-tmux-saver/internal/snapshot"
 	"github.com/mithro/go-tmux-saver/internal/tmuxctl"
+	"github.com/mithro/go-tmux-saver/internal/trace"
 )
 
 const (
@@ -66,7 +67,9 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 	}
 	snap := &snapshot.Snapshot{Schema: snapshot.SchemaVersion, Host: c.Host, TakenAt: now().UTC()}
 
+	stop := trace.Time("collect.server")
 	lines, err := c.T.Run(ctx, ServerCmd)
+	stop()
 	if err != nil {
 		return nil, nil, fmt.Errorf("server info: %w", err)
 	}
@@ -79,7 +82,9 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 		}
 	}
 
+	stop = trace.Time("collect.list-sessions")
 	sessLines, err := c.T.Run(ctx, SessCmd)
+	stop()
 	if err != nil {
 		return nil, nil, fmt.Errorf("list-sessions: %w", err)
 	}
@@ -100,7 +105,9 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 	}
 	sort.Strings(order)
 
+	stop = trace.Time("collect.list-windows")
 	winLines, err := c.T.Run(ctx, WinCmd)
+	stop()
 	if err != nil {
 		return nil, nil, fmt.Errorf("list-windows: %w", err)
 	}
@@ -137,7 +144,9 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 		winPos[session+"\t"+winIdxStr] = len(se.Windows) - 1
 	}
 
+	stop = trace.Time("collect.list-panes")
 	paneLines, err := c.T.Run(ctx, PaneCmd)
+	stop()
 	if err != nil {
 		return nil, nil, fmt.Errorf("list-panes: %w", err)
 	}
@@ -146,6 +155,7 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 		hist    int
 	}
 	var caps []capture
+	var resolveTotal time.Duration
 	// Pass 2: no further appends happen to any se.Windows slice, so taking
 	// &se.Windows[pos] here is safe and stable for the rest of Collect.
 	for _, l := range paneLines {
@@ -189,6 +199,9 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 		if err != nil {
 			return nil, nil, fmt.Errorf("malformed list-panes line (history_size): %q", l)
 		}
+		rs := time.Now()
+		restore := procs.Resolve(c.Procs, c.Reg, pid, c.Allowlist)
+		resolveTotal += time.Since(rs)
 		p := snapshot.Pane{
 			Index:        idx,
 			ID:           paneID,
@@ -196,20 +209,36 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 			Cwd:          cwd,
 			Title:        title,
 			HistoryLines: hist,
-			Restore:      procs.Resolve(c.Procs, c.Reg, pid, c.Allowlist),
+			Restore:      restore,
 		}
 		w.Panes = append(w.Panes, p)
 		caps = append(caps, capture{snapshot.PaneKey(session, w.Index, idx), paneID, hist})
 	}
 
+	trace.Logf("%-22s %v (%d panes)", "collect.resolve", resolveTotal, len(caps))
+
 	contents := map[string][]byte{}
+	var capTotal, capMax time.Duration
+	capBytes, capLines := 0, 0
 	for _, cp := range caps {
+		cs := time.Now()
 		lines, err := c.T.Run(ctx, fmt.Sprintf("capture-pane -epJ -S -%d -t %s", cp.hist, cp.id))
 		if err != nil {
 			return nil, nil, fmt.Errorf("capture %s: %w", cp.id, err)
 		}
-		contents[cp.key] = []byte(strings.Join(lines, "\n") + "\n")
+		body := []byte(strings.Join(lines, "\n") + "\n")
+		contents[cp.key] = body
+		if trace.Enabled {
+			d := time.Since(cs)
+			capTotal += d
+			if d > capMax {
+				capMax = d
+			}
+			capBytes += len(body)
+			capLines += len(lines)
+		}
 	}
+	trace.Logf("%-22s %v (n=%d max=%v lines=%d bytes=%d)", "collect.capture-pane", capTotal, len(caps), capMax, capLines, capBytes)
 
 	for _, name := range order {
 		se := sessions[name]
