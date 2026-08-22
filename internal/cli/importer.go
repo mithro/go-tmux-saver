@@ -56,20 +56,10 @@ func RunImportResurrect(w io.Writer, store *snapshot.Store, savePath, contentsTa
 	return 0
 }
 
-const importResurrectUsage = "usage: import-resurrect <savefile> [--contents TAR] [--promote] [--config PATH] [--data-dir DIR]"
+const importResurrectUsage = "usage: import-resurrect [flags] <savefile>  |  import-resurrect <savefile> [flags]"
 
 func init() {
 	register(command{"import-resurrect", "convert a tmux-resurrect save (tmux_resurrect_*.txt [+ pane_contents.tar.gz]) into a go-tmux-saver snapshot", func(args []string, stdout, stderr io.Writer) int {
-		// The documented usage is `import-resurrect <savefile> [flags...]`
-		// (savefile first) — flag.FlagSet stops parsing at the first
-		// non-flag argument, so pull the positional savefile out by hand
-		// before handing the rest to fs.Parse.
-		savePath, rest, ok := takeFirstPositional(args)
-		if !ok {
-			fmt.Fprintln(stderr, importResurrectUsage)
-			return 2
-		}
-
 		fs := flag.NewFlagSet("import-resurrect", flag.ContinueOnError)
 		contents := fs.String("contents", "", "path to tmux-resurrect's sibling pane_contents.tar.gz (omit for no pane contents)")
 		promote := fs.Bool("promote", true, "promote the imported snapshot to `last` (--promote=false stages then discards, printing counts only)")
@@ -77,12 +67,34 @@ func init() {
 		dataDir := fs.String("data-dir", "", "override config data dir")
 		cfgPath := fs.String("config", config.Path(), "config file")
 		fs.SetOutput(stderr)
-		if err := fs.Parse(rest); err != nil {
-			return 2
-		}
-		if fs.NArg() != 0 {
-			fmt.Fprintln(stderr, importResurrectUsage)
-			return 2
+
+		// RULING R36: if args[0] doesn't look like a flag, it's the savefile
+		// and the rest are flags (`import-resurrect <savefile> [flags]`);
+		// otherwise the whole of args is parsed as flags and the savefile
+		// must be the sole remaining positional arg
+		// (`import-resurrect [flags] <savefile>`). This supports both
+		// orderings without the ambiguity of scanning for "the first
+		// non-flag token anywhere" (which could mistake a flag's value for
+		// the savefile).
+		var savePath string
+		if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+			savePath = args[0]
+			if err := fs.Parse(args[1:]); err != nil {
+				return 2
+			}
+			if fs.NArg() != 0 {
+				fmt.Fprintln(stderr, importResurrectUsage)
+				return 2
+			}
+		} else {
+			if err := fs.Parse(args); err != nil {
+				return 2
+			}
+			if fs.NArg() != 1 {
+				fmt.Fprintln(stderr, importResurrectUsage)
+				return 2
+			}
+			savePath = fs.Arg(0)
 		}
 
 		cfg, store, msg, code := commonSetup(*cfgPath, *socket, *dataDir)
@@ -93,17 +105,4 @@ func init() {
 
 		return RunImportResurrect(stdout, store, savePath, *contents, expandHome(cfg.ClaudeResumePath), *promote)
 	}})
-}
-
-// takeFirstPositional pulls the first non-flag ("-"-prefixed) argument out
-// of args, returning it plus the remaining args in original order (for
-// flag.FlagSet.Parse). ok is false if args has no non-flag argument.
-func takeFirstPositional(args []string) (positional string, rest []string, ok bool) {
-	for i, a := range args {
-		if !strings.HasPrefix(a, "-") {
-			rest = append(append([]string(nil), args[:i]...), args[i+1:]...)
-			return a, rest, true
-		}
-	}
-	return "", args, false
 }

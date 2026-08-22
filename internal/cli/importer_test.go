@@ -97,3 +97,55 @@ func TestImportResurrectCLINoContentsFlag(t *testing.T) {
 		t.Fatalf("stdout = %q, want it to contain %q", out.String(), want)
 	}
 }
+
+// TestImportResurrectCLISavefileAfterFlags covers RULING R36: savefile
+// LAST, flags first (`import-resurrect --contents TAR --data-dir DIR
+// <savefile>`) — this ordering used to misparse (the tar path could be
+// mistaken for the savefile); it must now work identically to savefile-first.
+func TestImportResurrectCLISavefileAfterFlags(t *testing.T) {
+	dataDir := t.TempDir()
+	cfgPath := writeConfig(t, "{}")
+
+	var out, errb bytes.Buffer
+	code := Run([]string{"import-resurrect", "--contents", resurrectTar, "--config", cfgPath, "--data-dir", dataDir, resurrectFixture}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	want := "imported 2 sessions, 3 windows, 4 panes (3 with contents)"
+	if !strings.Contains(out.String(), want) {
+		t.Fatalf("stdout = %q, want it to contain %q", out.String(), want)
+	}
+
+	gz, _ := snapshot.LookupCodec("gzip")
+	st := &snapshot.Store{Dir: dataDir, Codec: gz}
+	snap, _, err := st.Last()
+	if err != nil {
+		t.Fatalf("Store.Last() after promote: %v", err)
+	}
+	panes, windows := snap.CountPanes()
+	if len(snap.Sessions) != 2 || windows != 3 || panes != 4 {
+		t.Fatalf("promoted snapshot sessions=%d windows=%d panes=%d, want 2/3/4", len(snap.Sessions), windows, panes)
+	}
+}
+
+// TestImportResurrectCLIMissingSavefile covers no positional savefile at
+// all (only flags): exit 2, usage printed to stderr, nothing staged.
+func TestImportResurrectCLIMissingSavefile(t *testing.T) {
+	dataDir := t.TempDir()
+	cfgPath := writeConfig(t, "{}")
+
+	var out, errb bytes.Buffer
+	code := Run([]string{"import-resurrect", "--contents", resurrectTar, "--config", cfgPath, "--data-dir", dataDir}, &out, &errb)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	if !strings.Contains(errb.String(), "usage: import-resurrect") {
+		t.Fatalf("stderr = %q, want usage message", errb.String())
+	}
+
+	gz, _ := snapshot.LookupCodec("gzip")
+	st := &snapshot.Store{Dir: dataDir, Codec: gz}
+	if _, _, err := st.Last(); !os.IsNotExist(err) {
+		t.Fatalf("Store.Last() after missing-savefile error: err = %v, want ErrNotExist", err)
+	}
+}
