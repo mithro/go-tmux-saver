@@ -38,6 +38,24 @@ func resolveBinary() (string, error) {
 	return real, nil
 }
 
+// execTimeout bounds every real process execCommand runs (systemctl,
+// systemd-analyze, tmux list-keys). One shared bound keeps the seam's
+// signature exactly `func(name string, args ...string) ([]byte, error)` —
+// no per-call context parameter — at the cost of using the same timeout for
+// both the interactive `setup` subcommands and status's quick timer check.
+const execTimeout = 15 * time.Second
+
+// execCommand is the seam every real subprocess call in this file goes
+// through: run name(args...) to completion and return its combined
+// stdout+stderr. Tests swap this package var for a fake to assert dispatch
+// (systemctl vs. systemd-analyze, tmux list-keys, `systemctl --user
+// is-active` for timerState) without touching the real system.
+var execCommand = func(name string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
+	defer cancel()
+	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+}
+
 // realSystemctl is Env.Systemctl's real (non-test) implementation. It
 // doubles as a generic "run a systemd tool" injectable (see Env's doc
 // comment in internal/setup/env.go): a call shaped like
@@ -49,9 +67,7 @@ func realSystemctl(args ...string) (string, error) {
 	if len(args) >= 2 && args[1] == "verify" {
 		bin = "systemd-analyze"
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, bin, args...).CombinedOutput()
+	out, err := execCommand(bin, args...)
 	if err != nil {
 		return string(out), fmt.Errorf("%s %s: %w", bin, strings.Join(args, " "), err)
 	}
@@ -62,9 +78,7 @@ func realSystemctl(args ...string) (string, error) {
 // key bindings from cfg's tmux socket.
 func realTmuxBindings(cfg config.Config) func() (string, error) {
 	return func() (string, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		out, err := exec.CommandContext(ctx, "tmux", "-L", cfg.Socket, "list-keys").CombinedOutput()
+		out, err := execCommand("tmux", "-L", cfg.Socket, "list-keys")
 		if err != nil {
 			return string(out), fmt.Errorf("tmux -L %s list-keys: %w", cfg.Socket, err)
 		}
@@ -230,19 +244,25 @@ func runSetupUpdate(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// realTimerState is status.go's timerState replacement: the live
+// `systemctl --user is-active go-tmux-saver.timer` state, via execCommand
+// so tests can fake it. Any exec failure (systemctl missing, no user
+// systemd instance, timeout, non-zero exit for e.g. "inactive"/"failed"
+// reported as an error by is-active) reports "unknown" rather than
+// propagating an error status has no way to show.
+func realTimerState() string {
+	out, err := execCommand("systemctl", "--user", "is-active", "go-tmux-saver.timer")
+	if err != nil {
+		return "unknown"
+	}
+	return strings.TrimSpace(string(out))
+}
+
 func init() {
 	// Task 16 replaces status.go's placeholder timerState (which always
 	// reported "unknown") with the real check: the go-tmux-saver.timer's
 	// live systemd --user state.
-	timerState = func() string {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		out, err := exec.CommandContext(ctx, "systemctl", "--user", "is-active", "go-tmux-saver.timer").CombinedOutput()
-		if err != nil {
-			return "unknown"
-		}
-		return strings.TrimSpace(string(out))
-	}
+	timerState = realTimerState
 
 	register(command{"setup", "manage go-tmux-saver's systemd --user units and tmux.conf snippet (generate|install|validate|update)", func(args []string, stdout, stderr io.Writer) int {
 		if len(args) == 0 {

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -63,9 +62,7 @@ func Validate(env Env, files []Managed) []Drift {
 // config.json, which is parsed+Validate()'d instead), and mode. It can
 // return more than one Drift (e.g. wrong content AND wrong mode).
 func validateFile(env Env, f Managed) ([]Drift, bool) {
-	full := filepath.Join(env.ConfigHome, f.Rel)
-
-	data, err := os.ReadFile(full)
+	data, mode, err := readManagedFile(env, f)
 	if err != nil {
 		return []Drift{{Path: f.Rel, Kind: "missing", Diff: err.Error()}}, true
 	}
@@ -82,10 +79,10 @@ func validateFile(env Env, f Managed) ([]Drift, bool) {
 		drifts = append(drifts, Drift{Path: f.Rel, Kind: "differs", Diff: diffLines(string(f.Content), string(data))})
 	}
 
-	if info, err := os.Stat(full); err == nil && info.Mode().Perm() != f.Mode.Perm() {
+	if mode != f.Mode.Perm() {
 		drifts = append(drifts, Drift{
 			Path: f.Rel, Kind: "mode",
-			Diff: fmt.Sprintf("mode is %04o, want %04o", info.Mode().Perm(), f.Mode.Perm()),
+			Diff: fmt.Sprintf("mode is %04o, want %04o", mode, f.Mode.Perm()),
 		})
 	}
 
