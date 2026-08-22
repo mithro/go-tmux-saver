@@ -62,7 +62,7 @@ update}`, `alert`.
 
 | Piece | Responsibility |
 |---|---|
-| `go-tmux-saver save` | One control-mode connection + one `/proc` pass → versioned JSON snapshot + contents archive; guard; event log; prune. |
+| `go-tmux-saver save` | One control-mode connection + one `/proc` pass → snapshot directory (`layout.json` + per-pane hardlinked scrollback files); guard; event log; prune. |
 | `go-tmux-saver restore` | Plan + apply an additive merge of a snapshot into the running server; `--on-start` mode for seed-only servers. |
 | `go-tmux-saver.timer/.service` (user) | Periodic `save --auto`, `Persistent=true`, runs attached or detached. |
 | `go-tmux-saver-watch.timer/.service` (user) | Hourly `status --check-fresh`; mails if the newest good save is older than 3× the interval. |
@@ -70,7 +70,7 @@ update}`, `alert`.
 | `tmux-server.service.d/50-go-tmux-saver.conf` (drop-in) | `ExecStartPost=go-tmux-saver restore --on-start` on the existing, unmodified unit. |
 | `~/.config/go-tmux-saver/tmux.conf` | Generated keybinding snippet (`M-s`, `M-r`) sourced from the rcfiles tmux config by one guarded line. |
 | `~/.config/go-tmux-saver/config.json` | Generated defaults; the only file a human edits. |
-| `~/.local/share/go-tmux-saver/` | `snap-*.json`, `snap-*.contents.tar.<ext>`, `last` symlink, `rejected/`, `events.log`, freshness marker. |
+| `~/.local/share/go-tmux-saver/` | `snap-<UTC>/` directories (`layout.json` + `panes/` one file per pane, hardlinked when unchanged), `last` symlink, `rejected/`, `events.log`, freshness marker. |
 
 Everything the tool needs from tmux comes over **a single control-mode
 connection per invocation** (`tmux -L main -C …`). Everything it needs about
@@ -105,41 +105,63 @@ recorded as a restore argv only if its comm is on the configurable allowlist
 (default: `ssh mosh-client claude claude-resume vi vim nvim emacs man less more
 tail top htop`); otherwise the pane restores as a plain shell in its cwd.
 
-**Snapshot format.** `snap-<UTC timestamp>.json`, `"schema": 1`:
+**Snapshot format.** A snapshot is a **directory** `snap-<UTC timestamp>/`
+holding `layout.json` (`"schema": 1`, small — structure only) and `panes/`
+(one compressed scrollback file per pane, see below):
 
 ```
 { schema, host, tmux_version, taken_at, server_start, contents_codec,
   sessions: [ { name, active_window,
       windows: [ { index, name, layout, active, flags, automatic_rename,
           panes: [ { index, id, cwd, title, active, history_lines,
+                     content_sha256, content_file,
                      restore: { kind: "shell"|"argv"|"claude", argv: [...],
                                 claude_session: "<uuid>" } } ] } ] } ],
   client: { session },                # last attached client's session
   stats: { panes, windows, sessions, duration_ms } }
 ```
 
-Restore commands are argv arrays (no shell quoting). Scrollback lives in a
-sibling `snap-<UTC>.contents.tar.<ext>` containing one file per pane id.
+Restore commands are argv arrays (no shell quoting).
+
+**Per-pane files and hardlinks.** Each pane's captured scrollback is written
+to `panes/<session>_<window>_<pane>.txt<codec-ext>` (structural name, not the
+`%N` pane id — ids are reused after a server restart) and `layout.json`
+records `content_sha256` (hash of the *uncompressed* capture) and the
+`content_file` name. If the hash equals the hash of the structurally-same pane
+in the previous snapshot, the new file is a **hardlink** to that previous
+file — nothing is written. Idle placeholders and quiet shells therefore cost
+zero bytes per save. Retention is a plain `rm -r snap-<old>/`: the
+filesystem's link count is the garbage collector, so there is no manifest GC
+and no dangling reference. Hardlinks require one filesystem, which the single
+data dir guarantees. `import-resurrect` unpacks resurrect's
+`pane_contents.tar.gz` into the same per-pane layout.
 
 **Compression is pluggable.** A `Codec` interface (`Name`, `Ext`, `NewWriter`,
 `NewReader`) with a registry; `gzip` (stdlib) is the default and initially the
-only codec. The archive filename carries the codec's extension and the
-snapshot records `contents_codec`; restore selects the decoder from the
-snapshot, never from a default, so adding zstd later (e.g. `klauspost/compress`)
-is a registration plus a config switch, and old snapshots stay readable.
+only codec. Each per-pane file carries the codec's extension and `layout.json`
+records `contents_codec`; restore selects the decoder from the snapshot, never
+from a default, so adding zstd later (e.g. `klauspost/compress`) is a
+registration plus a config switch, and old snapshots stay readable. Because
+the hash is of the uncompressed capture, switching codec does not defeat
+hardlink dedup across the switch (the file is simply rewritten once).
 
-**Atomicity.** Every file is written to a temp name, fsync'd and renamed; the
-`last` symlink is swapped atomically. A crash mid-save can never leave a
-partial file or a dangling `last`.
+**Atomicity.** The snapshot is built in `snap-<UTC>.tmp/` (files written,
+fsync'd, hardlinks created), then the directory is renamed into place and the
+`last` symlink swapped atomically. A crash mid-save leaves at most a `*.tmp/`
+directory (removed on the next run) — never a partial snapshot or a dangling
+`last`.
 
 **Guard and promotion.** Same rule as today: a save is *degenerate* when
 `last` is rich (≥ `guard.min_panes`, default 5) and the new pane count × `guard.divisor` (default 3)
-≤ `last`'s pane count. Degenerate snapshots are written under `rejected/`
-(pruned) and **neither the layout nor the contents archive is promoted** —
-this closes the `pane_contents.tar.gz` hole. A snapshot structurally identical
-to `last` (ignoring timestamps, `history_lines`, titles) is logged `unchanged`
-and not kept, but a freshness marker is touched so the watchdog sees a healthy
-save.
+≤ `last`'s pane count. Degenerate snapshot directories are moved under
+`rejected/` (pruned) and **nothing is promoted — layout and scrollback
+together** — this closes the `pane_contents.tar.gz` hole. A snapshot
+structurally identical to `last` is logged `unchanged` and not kept, but a
+freshness marker is touched so the watchdog sees a healthy save. "Identical"
+ignores timestamps, `history_lines`, content hashes, and *shell* pane titles
+(they churn with every `cd`), but **includes titles beginning with `✳`** —
+Claude Code sets those to its conversation summary, which is meaningful state.
+Titles are always saved regardless.
 
 **Event log.** `events.log`, one tab-separated line per attempt:
 `iso_ts  outcome(kept|unchanged|rejected-degenerate|skipped|error)  panes
@@ -273,6 +295,12 @@ branches, always-suggest-update-branch, tag ruleset enforcing `vXX.ZZZ`.
   conflict, same-name skip, seed-only detection, missing cwd fallback; codec
   registry round-trip; snapshot schema round-trip; retention pruning;
   event-log parsing and `status`.
+- Storage layer: hash → hardlink decisions (unchanged pane links to the
+  previous snapshot's file, changed pane writes a new one, structural naming
+  survives pane-id reuse after a server restart), atomic `*.tmp/` → rename
+  promotion, retention `rm -r` leaving shared files alive (link counts),
+  codec switch rewriting once without breaking dedup, `unchanged` comparison
+  honouring the shell-title / `✳`-title rule.
 - CI integration tests against a real tmux on a throwaway socket
   (`tmux -L gts-test-$$`): build layout → `save` → `kill-server` → start seed →
   `restore --on-start` → assert identical structure; plus the merge path into a
@@ -301,5 +329,7 @@ branches, always-suggest-update-branch, tag ruleset enforcing `vXX.ZZZ`.
 | Restore gate | seed-only server check | deterministic; immune to boot clock skew |
 | Format | New versioned JSON + one-time importer | user chose not to preserve resurrect's format |
 | Compression | pluggable codec interface, gzip default | zstd later without format break |
+| Storage layout | snapshot directory; one compressed file per pane; hardlink when content hash unchanged | idle panes cost nothing; filesystem link count = GC; no tarball to clobber |
+| Pane titles | always saved; shell titles excluded from the `unchanged` compare, `✳` Claude titles included | Claude titles are conversation summaries (state); shell titles churn |
 | Config ownership | the binary (`setup`) | user requirement; enables ansible check→correct→verify |
 | Repo standards | github-setup skill, `vXX.ZZZ` tags | user's shared GitHub.md |
