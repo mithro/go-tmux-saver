@@ -65,3 +65,96 @@ func TestCollectBuildsSnapshot(t *testing.T) {
 		t.Fatalf("counts %d %d %+v", p, w, snap.Stats)
 	}
 }
+
+func newCollector(f *tmuxctl.Fake) *Collector {
+	tb, _ := procs.Scan("../procs/testdata/proc")
+	return &Collector{T: f, Procs: tb, Reg: procs.ClaudeRegistry{Dir: "../procs/testdata/sessions"},
+		Allowlist: procs.DefaultAllowlist, Host: "ten64", Now: func() time.Time { return time.Unix(100, 0).UTC() }}
+}
+
+// (i) a pane_title containing an embedded tab must still parse as one
+// field, and the tab must not shift history_size (which drives capture
+// depth) into a title fragment.
+func TestCollectPaneTitleWithEmbeddedTab(t *testing.T) {
+	f := &tmuxctl.Fake{Replies: map[string][]string{
+		ServerCmd:                       {"100\tnext-3.8\tdefault"},
+		SessCmd:                         {"default\t0\t1"},
+		WinCmd:                          {"default\t0\th\t1\t*\tlayout\ton"},
+		PaneCmd:                         {"default\t0\t0\t%0\t1\t100\t/home/tim\thas\ttab in it\t5"},
+		"capture-pane -epJ -S -5 -t %0": {"z"},
+	}}
+	c := newCollector(f)
+	snap, contents, err := c.Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pane := snap.Sessions[0].Windows[0].Panes[0]
+	if pane.Title != "has\ttab in it" {
+		t.Fatalf("title = %q, want embedded tab preserved", pane.Title)
+	}
+	if pane.HistoryLines != 5 {
+		t.Fatalf("history lines = %d, want 5", pane.HistoryLines)
+	}
+	if string(contents["default_0_0"]) != "z\n" {
+		t.Fatalf("contents = %q", contents["default_0_0"])
+	}
+}
+
+// (ii) a pane line with too few fields must fail loudly, not silently.
+func TestCollectMalformedPaneLineErrors(t *testing.T) {
+	f := &tmuxctl.Fake{Replies: map[string][]string{
+		ServerCmd: {"100\tnext-3.8\tdefault"},
+		SessCmd:   {"default\t0\t1"},
+		WinCmd:    {"default\t0\th\t1\t*\tlayout\ton"},
+		PaneCmd:   {"default\t0\t0\t%0\t1\t100\t/home/tim"}, // only 7 of 9 fields
+	}}
+	c := newCollector(f)
+	if _, _, err := c.Collect(context.Background()); err == nil || !strings.Contains(err.Error(), "malformed") {
+		t.Fatalf("err = %v, want a malformed-line error", err)
+	}
+}
+
+// (iii) a transport error on the server-info command must propagate.
+func TestCollectServerInfoErrorPropagates(t *testing.T) {
+	f := &tmuxctl.Fake{Replies: map[string][]string{}} // ServerCmd absent, Default nil → error
+	c := newCollector(f)
+	if _, _, err := c.Collect(context.Background()); err == nil || !strings.Contains(err.Error(), "server info") {
+		t.Fatalf("err = %v, want wrapped server info error", err)
+	}
+}
+
+// (iv) a transport error on capture-pane must propagate.
+func TestCollectCapturePaneErrorPropagates(t *testing.T) {
+	f := &tmuxctl.Fake{Replies: map[string][]string{
+		ServerCmd: {"100\tnext-3.8\tdefault"},
+		SessCmd:   {"default\t0\t1"},
+		WinCmd:    {"default\t0\th\t1\t*\tlayout\ton"},
+		PaneCmd:   {"default\t0\t0\t%0\t1\t100\t/home/tim\ttitle\t3"},
+		// no capture-pane reply, Default nil → error
+	}}
+	c := newCollector(f)
+	if _, _, err := c.Collect(context.Background()); err == nil || !strings.Contains(err.Error(), "capture") {
+		t.Fatalf("err = %v, want wrapped capture error", err)
+	}
+}
+
+// (v) an empty client_session field must not be treated as an error.
+func TestCollectEmptyClientSessionNoError(t *testing.T) {
+	f := &tmuxctl.Fake{Replies: map[string][]string{
+		ServerCmd: {"1\tnext-3.8\t"},
+		SessCmd:   {},
+		WinCmd:    {},
+		PaneCmd:   {},
+	}}
+	c := newCollector(f)
+	snap, _, err := c.Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Client.Session != "" {
+		t.Fatalf("client session = %q, want empty", snap.Client.Session)
+	}
+	if snap.ServerStart != 1 || snap.TmuxVersion != "next-3.8" {
+		t.Fatalf("server fields %+v", snap)
+	}
+}
