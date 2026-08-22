@@ -1,0 +1,8 @@
+{{.Header}}[Unit]
+Description=go-tmux-saver periodic snapshot
+After=tmux-server.service
+OnFailure=go-tmux-saver-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart={{.Binary}} save --auto --no-display

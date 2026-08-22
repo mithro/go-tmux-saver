@@ -1,0 +1,7 @@
+{{.Header}}[Unit]
+Description=go-tmux-saver freshness watch
+OnFailure=go-tmux-saver-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart={{.Binary}} status --check-fresh
