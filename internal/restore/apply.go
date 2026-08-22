@@ -143,7 +143,11 @@ func Apply(ctx context.Context, t tmuxctl.Transport, p Plan, contents func(paneK
 				continue
 			}
 			keys := " cat " + shellQuote([]string{path})
-			cmd := fmt.Sprintf("send-keys -t %s %s Enter", target, tmuxQuote(keys))
+			// The target is data-derived (session/window names are arbitrary
+			// user text), so it is quoted here rather than in BuildPlan: the
+			// "contents" action carries a RAW target so WinPlaceholder
+			// resolution above operates on plain text (C1/RULING R30).
+			cmd := fmt.Sprintf("send-keys -t %s %s Enter", tmuxQuote(target), tmuxQuote(keys))
 			if _, err := t.Run(ctx, cmd); err != nil {
 				report.Notes = append(report.Notes, fmt.Sprintf("%s: %v", cmd, err))
 			}

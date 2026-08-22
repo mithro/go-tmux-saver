@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/mithro/go-tmux-saver/internal/snapshot"
+	"github.com/mithro/go-tmux-saver/internal/tmuxctl"
 )
 
 // WinPlaceholder marks a relocated window's real index within an Action's
@@ -80,43 +81,20 @@ func shellQuote(argv []string) string {
 	return strings.Join(parts, " ")
 }
 
-// tmuxQuote wraps s as ONE tmux double-quoted command-line argument.
-//
-// RULING R30: tmux's own double-quote syntax is NOT Go's %q, and NOT a
-// POSIX shell's either — verified against this tmux (next-3.8) directly via
-// control mode: inside "…", tmux EXPANDS "$NAME" (an argument written as
-// "'echo' '$HOME'" is typed into the pane as "'echo' '/home/tim'" — tmux
-// resolved $HOME itself before send-keys ever ran), and Go-style "\xNN"
-// escapes are mangled (an argument written as "esc\x1bhere" is typed as
-// "escx1bhere" — tmux doesn't understand \x and just drops the backslash).
-// "\"", "\\", "\$", ";", "#{…}", and a raw literal tab all pass through
-// tmux's double-quote parsing untouched.
-//
-// So only backslash, the closing quote, and the dollar sign need escaping
-// for tmux itself. A literal newline or carriage return in the argument
-// would otherwise end the command line before reaching tmux's own escape
-// handling, so those are also escaped, as "\n"/"\r" text (not the control
-// bytes) — tmux does understand those in a double-quoted string. Every
-// other byte, including a raw ESC, passes through unescaped.
-func tmuxQuote(s string) string {
-	var b strings.Builder
-	b.Grow(len(s) + 2)
-	b.WriteByte('"')
-	for i := 0; i < len(s); i++ {
-		switch c := s[i]; c {
-		case '\\', '"', '$':
-			b.WriteByte('\\')
-			b.WriteByte(c)
-		case '\n':
-			b.WriteString(`\n`)
-		case '\r':
-			b.WriteString(`\r`)
-		default:
-			b.WriteByte(c)
-		}
+// tmuxQuote wraps s as ONE tmux double-quoted command-line argument — see
+// tmuxctl.Quote for the escaping rules (RULING R30) and for why EVERY
+// data-derived argument, composed "-t sess:idx[.pane]" targets included,
+// must go through it.
+func tmuxQuote(s string) string { return tmuxctl.Quote(s) }
+
+// cwdArg renders the " -c <dir>" fragment for a window/pane creation
+// command, or "" when there is no cwd at all (a saved window with no
+// panes) — an empty `-c ""` would otherwise ask tmux to chdir to nowhere.
+func cwdArg(cwd string) string {
+	if cwd == "" {
+		return ""
 	}
-	b.WriteByte('"')
-	return b.String()
+	return " -c " + tmuxQuote(cwd)
 }
 
 // cwdOrHome returns cwd if it still names an existing directory, else the
@@ -191,14 +169,14 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 			case sessionCreated && i == 0:
 				target = fmt.Sprintf("%s:%d", sess.Name, win.Index)
 				created = true
-				plan.tmux(sess.Name, fmt.Sprintf("new-session -d -s %s -n %s -c %s", sess.Name, win.Name, cwd0), "")
+				plan.tmux(sess.Name, fmt.Sprintf("new-session -d -s %s -n %s%s", tmuxQuote(sess.Name), tmuxQuote(win.Name), cwdArg(cwd0)), "")
 			default:
 				liveName, occ := liveByIdx[win.Index]
 				switch {
 				case !occ:
 					target = fmt.Sprintf("%s:%d", sess.Name, win.Index)
 					created = true
-					plan.tmux(sess.Name, fmt.Sprintf("new-window -d -t %s:%d -n %s -c %s", sess.Name, win.Index, win.Name, cwd0), "")
+					plan.tmux(sess.Name, fmt.Sprintf("new-window -d -t %s -n %s%s", tmuxQuote(target), tmuxQuote(win.Name), cwdArg(cwd0)), "")
 				case liveName == win.Name:
 					plan.Skipped++
 					plan.note(sess.Name, "skipped")
@@ -216,14 +194,14 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 					target = fmt.Sprintf("%s:%s", sess.Name, WinPlaceholder)
 					created = true
 					relocated = true
-					plan.tmux(sess.Name, fmt.Sprintf(`new-window -d -P -F "#{window_index}" -t %s: -n %s -c %s`, sess.Name, win.Name, cwd0), "relocated")
+					plan.tmux(sess.Name, fmt.Sprintf(`new-window -d -P -F "#{window_index}" -t %s -n %s%s`, tmuxQuote(sess.Name+":"), tmuxQuote(win.Name), cwdArg(cwd0)), "relocated")
 				}
 			}
 
 			for k := 1; k < len(win.Panes); k++ {
-				plan.tmux(sess.Name, fmt.Sprintf("split-window -d -t %s -c %s", target, cwdOrHome(win.Panes[k].Cwd)), "")
+				plan.tmux(sess.Name, fmt.Sprintf("split-window -d -t %s%s", tmuxQuote(target), cwdArg(cwdOrHome(win.Panes[k].Cwd))), "")
 			}
-			plan.tmux(sess.Name, fmt.Sprintf(`select-layout -t %s "%s"`, target, win.Layout), "")
+			plan.tmux(sess.Name, fmt.Sprintf("select-layout -t %s %s", tmuxQuote(target), tmuxQuote(win.Layout)), "")
 
 			activePane := 0
 			for _, pn := range win.Panes {
@@ -250,15 +228,15 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 						// and mangles \xNN) wraps it as one literal argument,
 						// spaces included, for the pane's own shell to re-parse
 						// on Enter — exactly as shellQuote intends.
-						plan.tmux(sess.Name, fmt.Sprintf("send-keys -t %s %s Enter", paneTarget, tmuxQuote(shellQuote(pn.Restore.Argv))), "")
+						plan.tmux(sess.Name, fmt.Sprintf("send-keys -t %s %s Enter", tmuxQuote(paneTarget), tmuxQuote(shellQuote(pn.Restore.Argv))), "")
 					}
 				case "claude":
-					plan.tmux(sess.Name, fmt.Sprintf("send-keys -t %s %s Enter", paneTarget, tmuxQuote(shellQuote([]string{o.ClaudeResumePath, pn.Restore.ClaudeSession}))), "")
+					plan.tmux(sess.Name, fmt.Sprintf("send-keys -t %s %s Enter", tmuxQuote(paneTarget), tmuxQuote(shellQuote([]string{o.ClaudeResumePath, pn.Restore.ClaudeSession}))), "")
 				}
 			}
-			plan.tmux(sess.Name, fmt.Sprintf("select-pane -t %s.%d", target, activePane), "")
+			plan.tmux(sess.Name, fmt.Sprintf("select-pane -t %s", tmuxQuote(fmt.Sprintf("%s.%d", target, activePane))), "")
 			if !win.AutomaticRename {
-				plan.tmux(sess.Name, fmt.Sprintf("set-window-option -t %s automatic-rename off", target), "")
+				plan.tmux(sess.Name, fmt.Sprintf("set-window-option -t %s automatic-rename off", tmuxQuote(target)), "")
 			}
 
 			if relocated {
@@ -267,7 +245,7 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 				plan.Created++
 			}
 			if created && win.Index == sess.ActiveWindow {
-				plan.tmux(sess.Name, fmt.Sprintf("select-window -t %s", target), "")
+				plan.tmux(sess.Name, fmt.Sprintf("select-window -t %s", tmuxQuote(target)), "")
 			}
 		}
 	}

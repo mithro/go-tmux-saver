@@ -1,6 +1,8 @@
 package restore
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -39,20 +41,20 @@ func TestPlanOnSeedServer(t *testing.T) {
 	p := BuildPlan(live, snapNet(), Options{ClaudeResumePath: "/home/tim/bin/claude-resume", Contents: true, SeedSession: "default", SeedWindow: "h"})
 	cmds := strings.Join(flatten(p), "\n")
 	for _, want := range []string{
-		"new-window -d -t default:1 -n rcfiles -c /tmp",
-		"new-session -d -s net -n swcfg -c /",
-		"split-window -d -t net:0 -c /home/tim", // missing cwd → $HOME fallback (HOME=/home/tim in test via t.Setenv)
-		`select-layout -t net:0 "L2"`,
-		`send-keys -t net:0.0 "'ssh' 'sw it'\\''s'" Enter`,
-		`send-keys -t default:1.0 "'/home/tim/bin/claude-resume' 'abc'" Enter`,
-		"select-window -t net:0",
-		"select-window -t default:1",
+		`new-window -d -t "default:1" -n "rcfiles" -c "/tmp"`,
+		`new-session -d -s "net" -n "swcfg" -c "/"`,
+		`split-window -d -t "net:0" -c "/home/tim"`, // missing cwd → $HOME fallback (HOME=/home/tim in test via t.Setenv)
+		`select-layout -t "net:0" "L2"`,
+		`send-keys -t "net:0.0" "'ssh' 'sw it'\\''s'" Enter`,
+		`send-keys -t "default:1.0" "'/home/tim/bin/claude-resume' 'abc'" Enter`,
+		`select-window -t "net:0"`,
+		`select-window -t "default:1"`,
 	} {
 		if !strings.Contains(cmds, want) {
 			t.Errorf("plan missing %q\n%s", want, cmds)
 		}
 	}
-	if strings.Contains(cmds, "rename-window -t default:0") || strings.Contains(cmds, "new-window -d -t default:0") {
+	if strings.Contains(cmds, `rename-window -t "default:0"`) || strings.Contains(cmds, `new-window -d -t "default:0"`) {
 		t.Error("seed window must not be touched")
 	}
 	if p.Created != 2 || p.Skipped != 1 || p.Relocated != 0 { // created rcfiles + net:0; default:0 h skipped (same name)
@@ -64,10 +66,10 @@ func TestPlanRelocatesOnConflict(t *testing.T) {
 	live := LiveState{Sessions: map[string][]LiveWindow{"default": {{0, "h"}, {1, "tmux-restore"}}}}
 	p := BuildPlan(live, snapNet(), Options{SeedSession: "default", SeedWindow: "h"})
 	cmds := strings.Join(flatten(p), "\n")
-	if strings.Contains(cmds, "rename-window -t default:1") || strings.Contains(cmds, "new-window -d -t default:1 ") {
+	if strings.Contains(cmds, `rename-window -t "default:1"`) || strings.Contains(cmds, `new-window -d -t "default:1" `) {
 		t.Fatalf("must never touch occupied window default:1\n%s", cmds)
 	}
-	if !strings.Contains(cmds, `new-window -d -P -F "#{window_index}" -t default: -n rcfiles -c /tmp`) || p.Relocated != 1 {
+	if !strings.Contains(cmds, `new-window -d -P -F "#{window_index}" -t "default:" -n "rcfiles" -c "/tmp"`) || p.Relocated != 1 {
 		t.Fatalf("expected relocation\n%s %+v", cmds, p)
 	}
 }
@@ -132,7 +134,7 @@ func TestPlanSelectWindowNotDeferredAcrossRelocations(t *testing.T) {
 				secondRelocIdx = i
 			}
 		}
-		if cmd == "select-window -t default:{{WIN}}" {
+		if cmd == `select-window -t "default:{{WIN}}"` {
 			selectCount++
 			if selectIdx == -1 {
 				selectIdx = i
@@ -194,21 +196,6 @@ func TestPlanArgvDollarSignEscapedForTmux(t *testing.T) {
 	}
 }
 
-// TestTmuxQuote covers RULING R30's escaping rules directly: backslash,
-// double-quote, and dollar sign are escaped (dollar because tmux's own
-// double-quote parsing expands "$NAME" — verified against this tmux via
-// control mode); a literal newline is escaped as "\n" text; and a raw ESC
-// byte (0x1B) passes through completely untouched (Go's %q would have
-// mangled it, per the same verification — tmux doesn't understand \xNN).
-func TestTmuxQuote(t *testing.T) {
-	in := "a\\b\"c$d\ne" + "\x1b" + "f"
-	got := tmuxQuote(in)
-	want := `"a\\b\"c\$d\ne` + "\x1b" + `f"`
-	if got != want {
-		t.Fatalf("tmuxQuote(%q) = %q, want %q", in, got, want)
-	}
-}
-
 func flatten(p Plan) []string {
 	var out []string
 	for _, a := range p.Actions {
@@ -217,4 +204,91 @@ func flatten(p Plan) []string {
 		}
 	}
 	return out
+}
+
+// TestPlanQuotesDataDerivedArguments covers C1: session names, window
+// names, cwds and every composed "-t sess:idx[.pane]" target are attacker-
+// influenced data (a tmux session can be named anything), so each must be
+// spliced into the tmux command line as ONE tmuxQuote'd argument. Before
+// this fix a session named `evil;kill-window -t default:0` executed
+// kill-window against the live server (probe-confirmed), and a cwd
+// containing a space split into two arguments.
+func TestPlanQuotesDataDerivedArguments(t *testing.T) {
+	base := t.TempDir()
+	cwdSpace := filepath.Join(base, "dir with space")
+	cwdSemi := filepath.Join(base, "semi;colon dir")
+	for _, d := range []string{cwdSpace, cwdSemi} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	evil := "evil;kill-window -t default:0"
+	snap := &snapshot.Snapshot{Sessions: []snapshot.Session{
+		{Name: evil, ActiveWindow: 0, Windows: []snapshot.Window{
+			{Index: 0, Name: "a;b c", Layout: "L 0", Panes: []snapshot.Pane{
+				{Index: 0, Cwd: cwdSpace, Active: true, Restore: snapshot.Restore{Kind: "argv", Argv: []string{"echo", "hi there"}}},
+				{Index: 1, Cwd: cwdSemi},
+			}},
+		}},
+		{Name: "sess two", ActiveWindow: 9, Windows: []snapshot.Window{
+			{Index: 3, Name: "reloc me", Layout: "L 3", Panes: []snapshot.Pane{{Index: 0, Cwd: cwdSpace}}},
+			{Index: 9, Name: "free idx", Layout: "L 9", AutomaticRename: true, Panes: []snapshot.Pane{{Index: 0, Cwd: cwdSemi}}},
+		}},
+	}}
+	live := LiveState{Sessions: map[string][]LiveWindow{"sess two": {{3, "someone else"}}}}
+
+	p := BuildPlan(live, snap, Options{Contents: false})
+	cmds := flatten(p)
+	joined := strings.Join(cmds, "\n")
+
+	for _, want := range []string{
+		`new-session -d -s "evil;kill-window -t default:0" -n "a;b c" -c "` + cwdSpace + `"`,
+		`split-window -d -t "evil;kill-window -t default:0:0" -c "` + cwdSemi + `"`,
+		`select-layout -t "evil;kill-window -t default:0:0" "L 0"`,
+		`send-keys -t "evil;kill-window -t default:0:0.0" "'echo' 'hi there'" Enter`,
+		`select-pane -t "evil;kill-window -t default:0:0.0"`,
+		`set-window-option -t "evil;kill-window -t default:0:0" automatic-rename off`,
+		`select-window -t "evil;kill-window -t default:0:0"`,
+		`new-window -d -P -F "#{window_index}" -t "sess two:" -n "reloc me" -c "` + cwdSpace + `"`,
+		`new-window -d -t "sess two:9" -n "free idx" -c "` + cwdSemi + `"`,
+		`select-layout -t "sess two:{{WIN}}" "L 3"`,
+		`select-window -t "sess two:9"`,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("plan missing %q\n%s", want, joined)
+		}
+	}
+
+	// Nothing data-derived may appear outside a quoted argument: every
+	// emitted command line's arguments after the verb must be either a
+	// tmux-literal token (no space/semicolon) or a "…" quoted string.
+	for _, cmd := range cmds {
+		if strings.Contains(unquotedParts(cmd), ";") {
+			t.Errorf("unquoted %q in command line: %q", ";", cmd)
+		}
+	}
+}
+
+// unquotedParts returns cmd with every "…"-quoted span (honouring
+// backslash escapes) removed, i.e. only the parts tmux itself parses as
+// command structure. Used to prove no data-derived text escapes its quotes.
+func unquotedParts(cmd string) string {
+	var b strings.Builder
+	inQuote := false
+	for i := 0; i < len(cmd); i++ {
+		c := cmd[i]
+		if inQuote && c == '\\' {
+			i++
+			continue
+		}
+		if c == '"' {
+			inQuote = !inQuote
+			continue
+		}
+		if !inQuote {
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }

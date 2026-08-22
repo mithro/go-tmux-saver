@@ -256,7 +256,7 @@ func TestRunRestoreCountsErrorsFromFailedCreate(t *testing.T) {
 	}}
 	snapDir := writeSnapshotDir(t, snap)
 
-	failCmd := "new-session -d -s extra -n w -c /tmp"
+	failCmd := `new-session -d -s "extra" -n "w" -c "/tmp"`
 	f := &failingTransport{
 		Fake: &tmuxctl.Fake{
 			Replies: map[string][]string{

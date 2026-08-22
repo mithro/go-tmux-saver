@@ -26,7 +26,7 @@ func TestApplyRelocationAndContentsReplay(t *testing.T) {
 
 	f := &tmuxctl.Fake{
 		Replies: map[string][]string{
-			`new-window -d -P -F "#{window_index}" -t default: -n rcfiles -c /tmp`: {"7"},
+			`new-window -d -P -F "#{window_index}" -t "default:" -n "rcfiles" -c "/tmp"`: {"7"},
 		},
 		Default: []string{},
 	}
@@ -51,10 +51,10 @@ func TestApplyRelocationAndContentsReplay(t *testing.T) {
 	}
 
 	calls := strings.Join(f.Calls, "\n")
-	if !strings.Contains(calls, `send-keys -t default:7.0 "'/home/tim/bin/claude-resume' 'abc'" Enter`) {
+	if !strings.Contains(calls, `send-keys -t "default:7.0" "'/home/tim/bin/claude-resume' 'abc'" Enter`) {
 		t.Errorf("placeholder not substituted in send-keys:\n%s", calls)
 	}
-	if !strings.Contains(calls, `select-layout -t default:7 "L1"`) {
+	if !strings.Contains(calls, `select-layout -t "default:7" "L1"`) {
 		t.Errorf("placeholder not substituted in select-layout:\n%s", calls)
 	}
 	if strings.Contains(calls, WinPlaceholder) {
@@ -65,7 +65,7 @@ func TestApplyRelocationAndContentsReplay(t *testing.T) {
 	}
 
 	wantFile := filepath.Join(replayDir, netPaneKey+".txt")
-	wantCmd := fmt.Sprintf("send-keys -t net:0.0 %s Enter", tmuxQuote(" cat "+shellQuote([]string{wantFile})))
+	wantCmd := fmt.Sprintf("send-keys -t %s %s Enter", tmuxQuote("net:0.0"), tmuxQuote(" cat "+shellQuote([]string{wantFile})))
 	if !strings.Contains(calls, wantCmd) {
 		t.Errorf("expected cat-replay send-keys %q, got:\n%s", wantCmd, calls)
 	}
@@ -113,7 +113,7 @@ func TestApplyCreationFailureAbortsOnlyThatBlock(t *testing.T) {
 	live := LiveState{Sessions: map[string][]LiveWindow{"default": {{0, "h"}, {1, "tmux-restore"}}}}
 	p := BuildPlan(live, snapNet(), Options{SeedSession: "default", SeedWindow: "h"})
 
-	relocCmd := `new-window -d -P -F "#{window_index}" -t default: -n rcfiles -c /tmp`
+	relocCmd := `new-window -d -P -F "#{window_index}" -t "default:" -n "rcfiles" -c "/tmp"`
 	f := &failOnce{Fake: &tmuxctl.Fake{Default: []string{}}, failCmd: relocCmd}
 
 	report, err := Apply(context.Background(), f, p, func(string) ([]byte, bool) { return nil, false }, t.TempDir())
@@ -125,10 +125,10 @@ func TestApplyCreationFailureAbortsOnlyThatBlock(t *testing.T) {
 	if strings.Contains(calls, WinPlaceholder) {
 		t.Errorf("unresolved placeholder leaked after a failed relocation:\n%s", calls)
 	}
-	if !strings.Contains(calls, "new-session -d -s net -n swcfg -c /") {
+	if !strings.Contains(calls, `new-session -d -s "net" -n "swcfg" -c "/"`) {
 		t.Errorf("unrelated session creation should still run:\n%s", calls)
 	}
-	if !strings.Contains(calls, "select-window -t net:0") {
+	if !strings.Contains(calls, `select-window -t "net:0"`) {
 		t.Errorf("unrelated window's own actions should still run:\n%s", calls)
 	}
 
@@ -162,7 +162,7 @@ func TestApplyPlainNewWindowFailureAbortsBlock(t *testing.T) {
 	live := LiveState{Sessions: map[string][]LiveWindow{"default": {{0, "h"}}}}
 	p := BuildPlan(live, snapNet(), Options{SeedSession: "default", SeedWindow: "h"})
 
-	failCmd := "new-window -d -t default:1 -n rcfiles -c /tmp"
+	failCmd := `new-window -d -t "default:1" -n "rcfiles" -c "/tmp"`
 	f := &failOnce{Fake: &tmuxctl.Fake{Default: []string{}}, failCmd: failCmd}
 
 	report, err := Apply(context.Background(), f, p, func(string) ([]byte, bool) { return nil, false }, t.TempDir())
@@ -180,7 +180,7 @@ func TestApplyPlainNewWindowFailureAbortsBlock(t *testing.T) {
 		t.Fatalf("expected exactly the failed new-window call to mention default:1 (no split-window/select-layout/send-keys/select-pane/set-window-option for it), got %d calls:\n%s", count, strings.Join(f.Fake.Calls, "\n"))
 	}
 	calls := strings.Join(f.Fake.Calls, "\n")
-	if !strings.Contains(calls, "new-session -d -s net -n swcfg -c /") {
+	if !strings.Contains(calls, `new-session -d -s "net" -n "swcfg" -c "/"`) {
 		t.Errorf("the next session's creation should still run:\n%s", calls)
 	}
 
@@ -218,7 +218,7 @@ func TestApplyNewSessionFailureAbortsWholeSession(t *testing.T) {
 	live := LiveState{Sessions: map[string][]LiveWindow{"default": {{0, "h"}}}} // neither "net" nor "other" exist live
 	p := BuildPlan(live, snap, Options{SeedSession: "default", SeedWindow: "h"})
 
-	failCmd := "new-session -d -s net -n swcfg -c /tmp"
+	failCmd := `new-session -d -s "net" -n "swcfg" -c "/tmp"`
 	f := &failOnce{Fake: &tmuxctl.Fake{Default: []string{}}, failCmd: failCmd}
 
 	report, err := Apply(context.Background(), f, p, func(string) ([]byte, bool) { return nil, false }, t.TempDir())
@@ -232,7 +232,7 @@ func TestApplyNewSessionFailureAbortsWholeSession(t *testing.T) {
 		}
 	}
 	calls := strings.Join(f.Fake.Calls, "\n")
-	if !strings.Contains(calls, "new-session -d -s other -n w -c /tmp") {
+	if !strings.Contains(calls, `new-session -d -s "other" -n "w" -c "/tmp"`) {
 		t.Errorf("the following unrelated session's creation should still run:\n%s", calls)
 	}
 
@@ -268,5 +268,59 @@ func TestApplyContextCancelledStopsAndReturnsErr(t *testing.T) {
 	}
 	if len(f.Calls) != 0 {
 		t.Errorf("expected no tmux calls once the context is already done, got %v", f.Calls)
+	}
+}
+
+// TestApplyLiveServerHostileWindowName covers C1 end-to-end against a real
+// tmux server: a saved window named `a;b c` (a tmux command separator plus
+// a space) must be created with EXACTLY that name and must not execute the
+// `b c` fragment as a second tmux command. The pre-fix planner emitted
+// `new-window ... -n a;b c ...`, which tmux split at the ';' — a saved name
+// of `evil;kill-window -t default:0` actually killed a live window.
+func TestApplyLiveServerHostileWindowName(t *testing.T) {
+	sock := tmuxctl.StartTestServer(t) // session "default", window 0 named "h"
+	ctx := context.Background()
+	c, err := tmuxctl.Dial(ctx, sock, "default")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer c.Close()
+
+	cwd := t.TempDir()
+	hostile := "a;b c"
+	// A layout string carries its own checksum, so take a real one off the
+	// live seed window rather than inventing one select-layout would reject.
+	layoutLines, err := c.Run(ctx, `list-windows -a -F "#{window_layout}"`)
+	if err != nil || len(layoutLines) == 0 {
+		t.Fatalf("list-windows layout: %v %v", layoutLines, err)
+	}
+	layout := layoutLines[0]
+	snap := &snapshot.Snapshot{Sessions: []snapshot.Session{
+		{Name: "default", ActiveWindow: 0, Windows: []snapshot.Window{
+			{Index: 0, Name: "h", Layout: layout, Panes: []snapshot.Pane{{Index: 0, Cwd: cwd}}},
+			{Index: 1, Name: hostile, Layout: layout, AutomaticRename: true, Panes: []snapshot.Pane{{Index: 0, Cwd: cwd}}},
+		}},
+	}}
+	live, qerr := QueryLive(ctx, c)
+	if qerr != nil {
+		t.Fatalf("QueryLive: %v", qerr)
+	}
+	plan := BuildPlan(live, snap, Options{})
+
+	report, err := Apply(ctx, c, plan, func(string) ([]byte, bool) { return nil, false }, filepath.Join(t.TempDir(), "replay"))
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if len(report.Notes) != 0 {
+		t.Fatalf("unexpected notes: %v", report.Notes)
+	}
+
+	lines, err := c.Run(ctx, `list-windows -a -F "#{session_name}:#{window_index}\t#{window_name}"`)
+	if err != nil {
+		t.Fatalf("list-windows: %v", err)
+	}
+	got := strings.Join(lines, "\n")
+	if got != "default:0\th\ndefault:1\ta;b c" {
+		t.Fatalf("live windows =\n%s\nwant exactly default:0 h + default:1 %q (nothing else created or killed)", got, hostile)
 	}
 }
