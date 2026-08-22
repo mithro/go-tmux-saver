@@ -1,7 +1,12 @@
 package cli
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,4 +66,114 @@ func TestSaveOutcomes(t *testing.T) {
 		t.Fatal("expected calls")
 	}
 	_ = time.Second
+}
+
+// writeConfig writes a JSON config overlay (typically "{}" or a small
+// override) to a fresh temp file and returns its path, for driving the save
+// subcommand through Run() rather than RunSave() directly.
+func writeConfig(t *testing.T, json string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(p, []byte(json), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// TestSaveCLIAutoNoServerSkipped covers `save --auto` against a socket with
+// no tmux server listening: exit 0, "skipped" on stdout, one "skipped" event.
+func TestSaveCLIAutoNoServerSkipped(t *testing.T) {
+	cfgPath := writeConfig(t, "{}")
+	dataDir := t.TempDir()
+	sock := fmt.Sprintf("gts-nonexistent-%d", os.Getpid())
+
+	var out, errb bytes.Buffer
+	code := Run([]string{"save", "--auto", "--config", cfgPath, "--data-dir", dataDir, "--socket", sock}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	if !strings.Contains(out.String(), "skipped") {
+		t.Fatalf("stdout = %q, want to contain %q", out.String(), "skipped")
+	}
+	ev, err := snapshot.TailEvents(dataDir, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ev) != 1 || ev[0].Outcome != "skipped" || ev[0].Detail != "no server" {
+		t.Fatalf("events %+v", ev)
+	}
+}
+
+// TestSaveCLIManualNoServerErrors covers a manual (non---auto) save against
+// a socket with no tmux server: exit 1, not a skip.
+func TestSaveCLIManualNoServerErrors(t *testing.T) {
+	cfgPath := writeConfig(t, "{}")
+	dataDir := t.TempDir()
+	sock := fmt.Sprintf("gts-nonexistent-%d", os.Getpid())
+
+	var out, errb bytes.Buffer
+	code := Run([]string{"save", "--config", cfgPath, "--data-dir", dataDir, "--socket", sock}, &out, &errb)
+	if code != 1 {
+		t.Fatalf("exit %d, want 1; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+}
+
+// TestSaveCLILiveServerKept drives the save subcommand end-to-end against a
+// real tmux server (tmuxctl.StartTestServer), proving --data-dir wins over
+// config.DataDir(): the "last" symlink must land in the flag-supplied dir.
+func TestSaveCLILiveServerKept(t *testing.T) {
+	sock := tmuxctl.StartTestServer(t)
+	cfgPath := writeConfig(t, "{}")
+	dataDir := t.TempDir()
+
+	var out, errb bytes.Buffer
+	code := Run([]string{"save", "--no-display", "--config", cfgPath, "--data-dir", dataDir, "--socket", sock}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	if !strings.HasPrefix(out.String(), "kept") {
+		t.Fatalf("stdout = %q, want prefix %q", out.String(), "kept")
+	}
+	ev, err := snapshot.TailEvents(dataDir, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range ev {
+		if e.Outcome == "kept" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("events %+v, want a kept event", ev)
+	}
+	if _, err := os.Lstat(filepath.Join(dataDir, "last")); err != nil {
+		t.Fatalf("expected %s/last to exist (proves --data-dir wins over config.DataDir()): %v", dataDir, err)
+	}
+}
+
+// TestSaveCLIAutoBadSeedSessionErrors pins Finding 1: a live server with a
+// misconfigured seed_session must NOT be classified as ErrNoServer just
+// because Dial's attach failure surfaces "control connection closed" — it is
+// a genuine error, so --auto still exits 1 (not "skipped").
+func TestSaveCLIAutoBadSeedSessionErrors(t *testing.T) {
+	sock := tmuxctl.StartTestServer(t)
+	cfgPath := writeConfig(t, `{"seed_session": "nonexistent-session"}`)
+	dataDir := t.TempDir()
+
+	var out, errb bytes.Buffer
+	code := Run([]string{"save", "--auto", "--config", cfgPath, "--data-dir", dataDir, "--socket", sock}, &out, &errb)
+	if code != 1 {
+		t.Fatalf("exit %d, want 1 (not skipped); stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	if strings.Contains(out.String(), "skipped") {
+		t.Fatalf("stdout = %q, should not report skipped", out.String())
+	}
+	ev, err := snapshot.TailEvents(dataDir, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ev) != 1 || ev[0].Outcome != "error" {
+		t.Fatalf("events %+v, want one error event", ev)
+	}
 }

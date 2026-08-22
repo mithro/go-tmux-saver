@@ -17,8 +17,13 @@ var ErrNoServer = errors.New("no tmux server running")
 func openTransport(ctx context.Context, cfg config.Config) (tmuxctl.Transport, error) {
 	c, err := tmuxctl.Dial(ctx, cfg.Socket, cfg.SeedSession)
 	if err != nil {
-		if strings.Contains(err.Error(), "no server running") || strings.Contains(err.Error(), "error connecting") ||
-			strings.Contains(err.Error(), "control connection closed") {
+		// Only Dial's has-session preflight ("no server running" / "error
+		// connecting") means no server is listening at all. Any other Dial
+		// failure — e.g. "control connection closed" from an attach that
+		// failed for another reason, such as a missing seed_session against
+		// a live server — is a genuine misconfiguration, not a "nothing to
+		// save yet" skip, and must not be swallowed into ErrNoServer.
+		if strings.Contains(err.Error(), "no server running") || strings.Contains(err.Error(), "error connecting") {
 			return nil, ErrNoServer
 		}
 		return nil, err

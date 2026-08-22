@@ -101,7 +101,12 @@ func RunSave(ctx context.Context, d SaveDeps) (Outcome, error) {
 	}
 	snapshot.TouchFresh(d.Store.Dir)
 	logEv("kept", snap, filepath.Base(dir), "")
-	snapshot.Prune(d.Store.Dir, d.Cfg.Retention.Keep, d.Cfg.Retention.DailyDays, d.Cfg.Retention.Rejected, time.Now())
+	if _, perr := snapshot.Prune(d.Store.Dir, d.Cfg.Retention.Keep, d.Cfg.Retention.DailyDays, d.Cfg.Retention.Rejected, time.Now()); perr != nil {
+		// Pruning is best-effort housekeeping: a failure here doesn't
+		// invalidate the save that just succeeded, but must not be silently
+		// dropped either.
+		logEv("error", snap, filepath.Base(dir), "prune: "+perr.Error())
+	}
 	d.Display(fmt.Sprintf("saved %d panes in %.1fs", newPanes, time.Since(start).Seconds()))
 	return Outcome{Kind: "kept", Dir: dir, Panes: newPanes, LastPanes: lastPanes, Duration: time.Since(start)}, nil
 }
@@ -154,6 +159,9 @@ func init() {
 				fmt.Fprintln(stdout, "skipped: no tmux server")
 				return 0
 			}
+			// Any other Dial failure (including isNoServer without --auto) is
+			// a genuine error, not a skip: log it and exit 1 either way.
+			snapshot.AppendEvent(store.Dir, snapshot.Event{Time: time.Now(), Outcome: "error", Detail: err.Error()})
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
