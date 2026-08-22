@@ -3,6 +3,7 @@ package collect
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -16,10 +17,19 @@ import (
 )
 
 const (
-	SessCmd   = "list-sessions -F \"#{session_name}\t#{session_grouped}\t#{session_attached}\""
-	WinCmd    = "list-windows -a -F \"#{session_name}\t#{window_index}\t#{window_name}\t#{window_active}\t#{window_flags}\t#{window_layout}\t#{automatic-rename}\""
-	PaneCmd   = "list-panes -a -F \"#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_active}\t#{pane_pid}\t#{pane_current_path}\t#{pane_title}\t#{history_size}\""
-	ServerCmd = "display-message -p \"#{start_time}\t#{version}\t#{client_session}\""
+	SessCmd = "list-sessions -F \"#{session_name}\t#{session_grouped}\t#{session_attached}\""
+	WinCmd  = "list-windows -a -F \"#{session_name}\t#{window_index}\t#{window_name}\t#{window_active}\t#{window_flags}\t#{window_layout}\t#{automatic-rename}\""
+	PaneCmd = "list-panes -a -F \"#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_active}\t#{pane_pid}\t#{pane_current_path}\t#{pane_title}\t#{history_size}\""
+	// ServerCmd's third field is the name of OUR OWN client — the control
+	// connection this process opened — which is what identifies (and lets
+	// us exclude) ourselves in ClientsCmd's list. It is NOT the user's
+	// session: display-message answers over our connection, so
+	// "#{client_session}" here would always be the seed session (RULING
+	// R44).
+	ServerCmd = "display-message -p \"#{start_time}\t#{version}\t#{client_name}\""
+	// ClientsCmd feeds the informational Snapshot.Client.Session: the
+	// session of the most-recently-active attached client that isn't us.
+	ClientsCmd = "list-clients -F \"#{client_activity}\t#{client_name}\t#{client_session}\""
 )
 
 // Collector builds a snapshot.Snapshot and per-pane contents by issuing
@@ -59,8 +69,14 @@ func splitTail(line string, nTail int) (head string, tail []string, ok bool) {
 	return rest, tail, true
 }
 
-func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string][]byte, error) {
+// Collect builds a snapshot of the live server plus every pane's captured
+// scrollback. The returned warnings are non-fatal problems the caller
+// should surface (currently: panes whose capture-pane answered with a tmux
+// %error, e.g. because the pane vanished mid-save) — the snapshot is still
+// complete and worth keeping.
+func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string][]byte, []string, error) {
 	start := time.Now()
+	var warnings []string
 	now := c.Now
 	if now == nil {
 		now = time.Now
@@ -71,22 +87,35 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 	lines, err := c.T.Run(ctx, ServerCmd)
 	stop()
 	if err != nil {
-		return nil, nil, fmt.Errorf("server info: %w", err)
+		return nil, nil, warnings, fmt.Errorf("server info: %w", err)
 	}
+	ourClient := ""
 	if len(lines) == 1 {
 		f := strings.Split(lines[0], "\t")
 		if len(f) == 3 {
 			snap.ServerStart, _ = strconv.ParseInt(f[0], 10, 64)
 			snap.TmuxVersion = f[1]
-			snap.Client.Session = f[2]
+			ourClient = f[2]
 		}
+	}
+
+	stop = trace.Time("collect.list-clients")
+	clientLines, cerr := c.T.Run(ctx, ClientsCmd)
+	stop()
+	if cerr != nil {
+		// Client.Session is informational only (RULING R44) — nothing
+		// restores from it — so failing to determine it must not cost the
+		// whole snapshot. Note it and carry on.
+		warnings = append(warnings, "list-clients failed: "+cerr.Error())
+	} else {
+		snap.Client.Session = activeClientSession(clientLines, ourClient)
 	}
 
 	stop = trace.Time("collect.list-sessions")
 	sessLines, err := c.T.Run(ctx, SessCmd)
 	stop()
 	if err != nil {
-		return nil, nil, fmt.Errorf("list-sessions: %w", err)
+		return nil, nil, warnings, fmt.Errorf("list-sessions: %w", err)
 	}
 	sessions := map[string]*snapshot.Session{}
 	var order []string
@@ -94,7 +123,7 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 		// session_name \t session_grouped \t session_attached
 		name, tail, ok := splitTail(l, 2)
 		if !ok {
-			return nil, nil, fmt.Errorf("malformed list-sessions line: %q", l)
+			return nil, nil, warnings, fmt.Errorf("malformed list-sessions line: %q", l)
 		}
 		grouped := tail[0]
 		if grouped == "1" {
@@ -109,7 +138,7 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 	winLines, err := c.T.Run(ctx, WinCmd)
 	stop()
 	if err != nil {
-		return nil, nil, fmt.Errorf("list-windows: %w", err)
+		return nil, nil, warnings, fmt.Errorf("list-windows: %w", err)
 	}
 	// Pass 1: append every window to its session, recording where it landed.
 	winPos := map[string]int{} // "session\tindex" -> position in se.Windows
@@ -119,11 +148,11 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 		// window_layout, automatic-rename.
 		head, tail, ok := splitTail(l, 4)
 		if !ok {
-			return nil, nil, fmt.Errorf("malformed list-windows line: %q", l)
+			return nil, nil, warnings, fmt.Errorf("malformed list-windows line: %q", l)
 		}
 		f := strings.SplitN(head, "\t", 3)
 		if len(f) != 3 {
-			return nil, nil, fmt.Errorf("malformed list-windows line: %q", l)
+			return nil, nil, warnings, fmt.Errorf("malformed list-windows line: %q", l)
 		}
 		session, winIdxStr, name := f[0], f[1], f[2]
 		active, flags, layout, autoRename := tail[0], tail[1], tail[2], tail[3]
@@ -134,7 +163,7 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 		}
 		idx, err := strconv.Atoi(winIdxStr)
 		if err != nil {
-			return nil, nil, fmt.Errorf("malformed list-windows line (window_index): %q", l)
+			return nil, nil, warnings, fmt.Errorf("malformed list-windows line (window_index): %q", l)
 		}
 		w := snapshot.Window{Index: idx, Name: name, Active: active == "1", Flags: flags, Layout: layout, AutomaticRename: autoRename == "on"}
 		if w.Active {
@@ -148,7 +177,7 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 	paneLines, err := c.T.Run(ctx, PaneCmd)
 	stop()
 	if err != nil {
-		return nil, nil, fmt.Errorf("list-panes: %w", err)
+		return nil, nil, warnings, fmt.Errorf("list-panes: %w", err)
 	}
 	type capture struct {
 		key, id string
@@ -169,11 +198,11 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 		// arbitrary user text (e.g. unicode status glyphs, command lines).
 		head, tail, ok := splitTail(l, 1)
 		if !ok {
-			return nil, nil, fmt.Errorf("malformed list-panes line: %q", l)
+			return nil, nil, warnings, fmt.Errorf("malformed list-panes line: %q", l)
 		}
 		f := strings.SplitN(head, "\t", 8)
 		if len(f) != 8 {
-			return nil, nil, fmt.Errorf("malformed list-panes line: %q", l)
+			return nil, nil, warnings, fmt.Errorf("malformed list-panes line: %q", l)
 		}
 		session, winIdxStr, paneIdxStr, paneID, paneActive, panePIDStr, cwd, title := f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]
 		histStr := tail[0]
@@ -189,15 +218,15 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 		w := &se.Windows[pos]
 		idx, err := strconv.Atoi(paneIdxStr)
 		if err != nil {
-			return nil, nil, fmt.Errorf("malformed list-panes line (pane_index): %q", l)
+			return nil, nil, warnings, fmt.Errorf("malformed list-panes line (pane_index): %q", l)
 		}
 		pid, err := strconv.Atoi(panePIDStr)
 		if err != nil {
-			return nil, nil, fmt.Errorf("malformed list-panes line (pane_pid): %q", l)
+			return nil, nil, warnings, fmt.Errorf("malformed list-panes line (pane_pid): %q", l)
 		}
 		hist, err := strconv.Atoi(histStr)
 		if err != nil {
-			return nil, nil, fmt.Errorf("malformed list-panes line (history_size): %q", l)
+			return nil, nil, warnings, fmt.Errorf("malformed list-panes line (history_size): %q", l)
 		}
 		// The clock reads are behind trace.Enabled so the untraced path
 		// really is one bool test per pane, not two time.Now() syscalls.
@@ -234,7 +263,19 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 		}
 		lines, err := c.T.Run(ctx, fmt.Sprintf("capture-pane -epJ -S -%d -t %s", cp.hist, cp.id))
 		if err != nil {
-			return nil, nil, fmt.Errorf("capture %s: %w", cp.id, err)
+			// RULING R48: tmux answering this one command with a %error
+			// (typically "can't find pane" — the pane closed between
+			// list-panes and here) costs exactly that pane's scrollback.
+			// The pane stays in the snapshot with no ContentFile, and the
+			// save proceeds. Anything else (connection closed/desynced,
+			// context expiry) means the transport itself is unusable, so
+			// there is nothing to be gained by continuing.
+			var cmdErr *tmuxctl.CmdError
+			if errors.As(err, &cmdErr) {
+				warnings = append(warnings, fmt.Sprintf("pane %s capture failed: %v", cp.id, err))
+				continue
+			}
+			return nil, nil, warnings, fmt.Errorf("capture %s: %w", cp.id, err)
 		}
 		body := []byte(strings.Join(lines, "\n") + "\n")
 		contents[cp.key] = body
@@ -262,5 +303,35 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 
 	p, w := snap.CountPanes()
 	snap.Stats = snapshot.Stats{Panes: p, Windows: w, Sessions: len(snap.Sessions), DurationMS: time.Since(start).Milliseconds()}
-	return snap, contents, nil
+	return snap, contents, warnings, nil
+}
+
+// activeClientSession returns the session of the most-recently-active
+// client in lines (as formatted by ClientsCmd) whose name is not ourClient,
+// or "" when we are the only client attached. RULING R44: this is
+// informational only.
+//
+// Each line is "client_activity \t client_name \t client_session"; the
+// session is taken as everything after the second tab, since a session name
+// may itself contain tabs (client_activity is a unix timestamp and
+// client_name a tty path, so neither can).
+func activeClientSession(lines []string, ourClient string) string {
+	best, bestAct := "", int64(-1)
+	for _, l := range lines {
+		f := strings.SplitN(l, "\t", 3)
+		if len(f) != 3 {
+			continue
+		}
+		if f[1] == ourClient {
+			continue // us: the control connection this process opened
+		}
+		act, err := strconv.ParseInt(f[0], 10, 64)
+		if err != nil {
+			continue
+		}
+		if act > bestAct {
+			best, bestAct = f[2], act
+		}
+	}
+	return best
 }

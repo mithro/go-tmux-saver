@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/mithro/go-tmux-saver/internal/collect"
@@ -93,11 +94,18 @@ func RunSave(ctx context.Context, d SaveDeps) (Outcome, error) {
 
 	c := &collect.Collector{T: d.T, Procs: d.Procs, Reg: d.Reg, Allowlist: d.Cfg.Allowlist, Host: d.Host}
 	stop := trace.Time("save.collect")
-	snap, contents, err := c.Collect(ctx)
+	snap, contents, warnings, err := c.Collect(ctx)
 	stop()
 	if err != nil {
 		logEv("error", nil, "", err.Error())
 		return Outcome{Kind: "error"}, err
+	}
+	// RULING R48: non-fatal collection problems (a pane that vanished
+	// mid-save, so its capture-pane answered with a %error) ride along in
+	// the event detail rather than being dropped on the floor.
+	warnDetail := ""
+	if len(warnings) > 0 {
+		warnDetail = "warn: " + strings.Join(warnings, "; ")
 	}
 	if !d.Cfg.Contents.Enabled {
 		contents = map[string][]byte{}
@@ -115,7 +123,7 @@ func RunSave(ctx context.Context, d SaveDeps) (Outcome, error) {
 		stop()
 		if same {
 			snapshot.TouchFresh(d.Store.Dir)
-			logEv("unchanged", snap, "", "")
+			logEv("unchanged", snap, "", warnDetail)
 			d.Display(fmt.Sprintf("unchanged (%d panes)", newPanes))
 			return Outcome{Kind: "unchanged", Panes: newPanes, LastPanes: lastPanes, Duration: time.Since(start)}, nil
 		}
@@ -150,7 +158,7 @@ func RunSave(ctx context.Context, d SaveDeps) (Outcome, error) {
 		return Outcome{Kind: "error"}, err
 	}
 	snapshot.TouchFresh(d.Store.Dir)
-	logEv("kept", snap, filepath.Base(dir), "")
+	logEv("kept", snap, filepath.Base(dir), warnDetail)
 	if _, perr := snapshot.Prune(d.Store.Dir, d.Cfg.Retention.Keep, d.Cfg.Retention.DailyDays, d.Cfg.Retention.Rejected, time.Now()); perr != nil {
 		// Pruning is best-effort housekeeping: a failure here doesn't
 		// invalidate the save that just succeeded, but must not be silently

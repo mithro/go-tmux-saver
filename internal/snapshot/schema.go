@@ -54,6 +54,12 @@ type Restore struct {
 	ClaudeSession string   `json:"claude_session,omitempty"`
 }
 
+// ClientState is INFORMATIONAL ONLY (RULING R44): the session of the
+// most-recently-active attached client at save time, excluding
+// go-tmux-saver's own control connection. Nothing in restore reads it —
+// which session a restore selects is decided by each saved session's own
+// ActiveWindow, not by whoever happened to be attached when the snapshot
+// was taken. It exists for humans reading layout.json.
 type ClientState struct {
 	Session string `json:"session"`
 }

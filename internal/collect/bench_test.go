@@ -125,7 +125,7 @@ func BenchmarkCollect(b *testing.B) {
 	var bytes, outLines float64
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_, contents, err := c.Collect(context.Background())
+		_, contents, _, err := c.Collect(context.Background())
 		if err != nil {
 			b.Fatalf("collect: %v", err)
 		}
@@ -168,7 +168,7 @@ func TestCollectManyPanes(t *testing.T) {
 	sock := startPanes(t, 4, 50)
 	c, closeFn := benchCollector(t, sock)
 	defer closeFn()
-	snap, contents, err := c.Collect(context.Background())
+	snap, contents, _, err := c.Collect(context.Background())
 	if err != nil {
 		t.Fatalf("collect: %v", err)
 	}
