@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -78,16 +79,8 @@ func (t *Table) Subtree(pid int) []int {
 	out := []int{pid}
 	for i := 0; i < len(out); i++ {
 		kids := append([]int(nil), t.children[out[i]]...)
-		sortInts(kids)
+		sort.Ints(kids)
 		out = append(out, kids...)
 	}
 	return out
-}
-
-func sortInts(a []int) {
-	for i := 1; i < len(a); i++ {
-		for j := i; j > 0 && a[j-1] > a[j]; j-- {
-			a[j-1], a[j] = a[j], a[j-1]
-		}
-	}
 }

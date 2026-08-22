@@ -22,6 +22,17 @@ func TestScanAndSubtree(t *testing.T) {
 	}
 }
 
+func TestEmbeddedParenInComm(t *testing.T) {
+	tb, err := Scan("testdata/proc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, ok := tb.Get(400)
+	if !ok || p.Comm != "a (b) c" || p.PPID != 1 || p.StartTime != "9000" {
+		t.Fatalf("proc 400 = %+v ok=%v", p, ok)
+	}
+}
+
 func TestClaudeRegistry(t *testing.T) {
 	reg := ClaudeRegistry{Dir: "testdata/sessions"}
 	tb, _ := Scan("testdata/proc")
@@ -36,5 +47,30 @@ func TestClaudeRegistry(t *testing.T) {
 	}
 	if _, ok := reg.SessionFor(Proc{PID: 777}); ok {
 		t.Fatal("missing registry file must not match")
+	}
+}
+
+func TestNumericProcStart(t *testing.T) {
+	reg := ClaudeRegistry{Dir: "testdata/sessions"}
+	tb, _ := Scan("testdata/proc")
+	p, _ := tb.Get(200)
+	sid, ok := reg.SessionFor(p)
+	if !ok || sid != "22222222-3333-4444-5555-666666666666" {
+		t.Fatalf("got %q %v", sid, ok)
+	}
+	// Verify it doesn't match with different starttime
+	p.StartTime = "8001"
+	if _, ok := reg.SessionFor(p); ok {
+		t.Fatal("numeric procStart with wrong starttime must not match")
+	}
+}
+
+func TestWrongTypedProcStart(t *testing.T) {
+	reg := ClaudeRegistry{Dir: "testdata/sessions"}
+	tb, _ := Scan("testdata/proc")
+	p, _ := tb.Get(102)
+	// ProcStart is JSON boolean (true), should fail closed
+	if _, ok := reg.SessionFor(p); ok {
+		t.Fatal("wrong-typed procStart (boolean) must not match")
 	}
 }

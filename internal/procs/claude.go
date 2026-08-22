@@ -39,6 +39,9 @@ func (r ClaudeRegistry) SessionFor(p Proc) (string, bool) {
 			if asNum.String() != p.StartTime {
 				return "", false
 			}
+		default:
+			// procStart is present but wrong type (e.g. bool, array, object)
+			return "", false
 		}
 	}
 	return e.SessionID, true
