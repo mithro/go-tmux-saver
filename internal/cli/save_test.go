@@ -153,9 +153,13 @@ func TestSaveCLILiveServerKept(t *testing.T) {
 }
 
 // TestSaveCLIAutoBadSeedSessionErrors pins Finding 1: a live server with a
-// misconfigured seed_session must NOT be classified as ErrNoServer just
-// because Dial's attach failure surfaces "control connection closed" — it is
-// a genuine error, so --auto still exits 1 (not "skipped").
+// misconfigured seed_session must NOT be classified as ErrNoServer — it is a
+// genuine error, so --auto still exits 1 (not "skipped"). It also pins the
+// round-2 fix: Dial itself must notice tmux's %error reply to the initial
+// attach (rather than handing back a *Client wrapping an already-exited
+// tmux), so the logged error's Detail carries the session name straight from
+// Dial — proving the failure was caught there, not later inside Collect as a
+// generic "control connection closed".
 func TestSaveCLIAutoBadSeedSessionErrors(t *testing.T) {
 	sock := tmuxctl.StartTestServer(t)
 	cfgPath := writeConfig(t, `{"seed_session": "nonexistent-session"}`)
@@ -175,5 +179,8 @@ func TestSaveCLIAutoBadSeedSessionErrors(t *testing.T) {
 	}
 	if len(ev) != 1 || ev[0].Outcome != "error" {
 		t.Fatalf("events %+v, want one error event", ev)
+	}
+	if !strings.Contains(ev[0].Detail, "nonexistent-session") {
+		t.Fatalf("event detail = %q, want it to contain %q (proving the error came from Dial, not Collect)", ev[0].Detail, "nonexistent-session")
 	}
 }

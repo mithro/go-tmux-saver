@@ -68,12 +68,23 @@ func Dial(ctx context.Context, socket, session string) (*Client, error) {
 		close(c.replies)
 	}()
 	// initial attach block
-	if _, err := c.next(ctx); err != nil {
+	reply, err := c.next(ctx)
+	if err != nil {
 		c.Close()
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
 			return nil, fmt.Errorf("attach to %s on socket %s: %w: %s", session, socket, err, msg)
 		}
 		return nil, fmt.Errorf("attach to %s on socket %s: %w", session, socket, err)
+	}
+	if reply.Err {
+		// tmux answered the initial attach with a well-formed %error block
+		// (e.g. "can't find session: X") rather than failing to reply at
+		// all — the control client itself started fine, so the earlier
+		// os.exec-level failure paths above don't catch this. Close the
+		// now-useless client (it immediately %exits after an attach error)
+		// so it isn't leaked, and surface tmux's own error text.
+		c.Close()
+		return nil, fmt.Errorf("attach to %s on socket %s: %s", session, socket, strings.Join(reply.Lines, " "))
 	}
 	return c, nil
 }
