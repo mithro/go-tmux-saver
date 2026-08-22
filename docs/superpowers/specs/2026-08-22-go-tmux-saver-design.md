@@ -170,8 +170,17 @@ windows  sessions  clients  duration_ms  file  [detail]`.
 **Retention.** `prune` (run after each `--auto` save) keeps the newest 50
 snapshots plus one per day for 30 days; `rejected/` keeps 20.
 
-**Performance budget.** < 0.5 s for 50 panes; the only O(panes) work is the
-in-socket capture replies.
+**Performance budget.** The tool's own work (connection, listing, `/proc`
+pass, resolution, staging) is < 0.5 s per save (measured ≈ 110 ms for 41
+panes on ten64). Total wall time is dominated by tmux's own
+`capture-pane -e` cost, which is O(scrollback character cells) — measured
+≈ 0.38 µs per cell on tmux next-3.8/arm64, ≈ 3.5 s for 41 panes with full
+histories — and cannot be reduced by the tool (tmux is single-threaded;
+plain-client capture costs the same). Because of this, manual `M-s` saves
+run in the background (`run-shell -b`) so the UI never blocks. Future work
+(not in Plan 1): skip re-capturing panes whose history size/screen hash is
+unchanged since the last snapshot; an optional non-`-e` capture mode
+(≈4.6× cheaper, loses colour).
 
 ## 5. Trigger, restore and lifecycle integration
 
@@ -226,7 +235,8 @@ windows appear.
 - Idempotent: re-running completes a partial restore; the plan and every
   create/relocate/skip is logged.
 
-**Manual keys.** `M-s` → `run-shell "go-tmux-saver save"`,
+**Manual keys.** `M-s` → `run-shell -b "go-tmux-saver save"` (background:
+the capture cost above must never freeze the UI),
 `M-r` → `run-shell "go-tmux-saver restore --merge"`; both report one line via
 `display-message` (`saved 46 panes in 0.3s`, `rejected: degenerate (1 vs 46)`,
 `restored 3 sessions, 2 windows relocated`).
