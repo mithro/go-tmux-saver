@@ -14,9 +14,10 @@ import (
 )
 
 // timerState reports the go-tmux-saver systemd --user timer's active state.
-// Task 16 replaces this with a real injectable Systemctl-backed check
-// (`systemctl --user is-active go-tmux-saver.timer`); until then, status
-// always reports "unknown".
+// This "unknown" stub is overridden at package init by setup.go with the
+// real `systemctl --user is-active go-tmux-saver.timer` check; it stays a
+// package-level var (rather than a plain function) so tests can swap in a
+// fake instead of shelling out to the real systemctl.
 var timerState = func() string { return "unknown" }
 
 // statusEvent is snapshot.Event's JSON shape for `status --json`: lower-snake
