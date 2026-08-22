@@ -2,6 +2,7 @@ package tmuxctl
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -47,6 +48,28 @@ func TestClientContextTimeout(t *testing.T) {
 	defer cancel()
 	if _, err := c.Run(ctx, "list-sessions"); err == nil {
 		t.Fatal("expected context deadline error")
+	}
+}
+
+func TestClientDesyncAfterCancel(t *testing.T) {
+	sock := StartTestServer(t)
+	c, err := Dial(context.Background(), sock, "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
+	defer cancel()
+	if _, err := c.Run(ctx, "list-sessions"); err == nil {
+		t.Fatal("expected context deadline error")
+	}
+	// The stray reply to the cancelled command may still be in flight; a
+	// later Run, even with a fresh context, must not read it as its own
+	// answer — it must fail fast with ErrDesynced instead.
+	if _, err := c.Run(context.Background(), "list-sessions"); !errors.Is(err, ErrDesynced) {
+		t.Fatalf("expected ErrDesynced after a cancelled command, got %v", err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("close after desync: %v", err)
 	}
 }
 

@@ -29,6 +29,8 @@ type Fake struct {
 	Calls   []string
 }
 
+var _ Transport = (*Fake)(nil)
+
 func (f *Fake) Run(_ context.Context, cmd string) ([]string, error) {
 	f.Calls = append(f.Calls, cmd)
 	if r, ok := f.Replies[cmd]; ok {

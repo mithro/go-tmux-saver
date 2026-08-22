@@ -3,11 +3,13 @@ package tmuxctl
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // Client is a live control-mode connection to one tmux server.
@@ -18,7 +20,18 @@ type Client struct {
 	replies  chan Reply
 	parseErr chan error
 	mu       sync.Mutex
+	desynced atomic.Bool
 }
+
+var _ Transport = (*Client)(nil)
+
+// ErrDesynced is returned by Run once a previous command's context was
+// cancelled/expired before its reply arrived. That reply may still be in
+// flight on the control connection; reading further commands' replies
+// without it would misattribute it to the wrong command and shift every
+// later reply by one. Once desynchronised, a Client cannot be recovered —
+// callers must Dial a new one.
+var ErrDesynced = errors.New("control connection desynchronised after a cancelled command; dial again")
 
 // Dial starts `tmux -L socket -C attach-session -f no-output -t session` and
 // consumes the initial attach block. `-f no-output` stops pane output
@@ -92,14 +105,28 @@ func (c *Client) next(ctx context.Context) (Reply, error) {
 		}
 		return r, nil
 	case <-ctx.Done():
+		// The reply to whatever we just sent (or the initial attach, from
+		// Dial) may still be in flight. There is no way to know which
+		// future reply it is, so the connection is now unusable for
+		// further correlated request/reply calls.
+		c.desynced.Store(true)
 		return Reply{}, ctx.Err()
 	}
 }
 
-// Run sends one command and returns its reply lines. Commands are serialised.
+// Run sends one command and returns its reply lines. Commands are
+// serialised. If an earlier Run's (or Dial's initial attach) context was
+// cancelled before tmux replied, the connection is left desynchronised —
+// that stray reply may still land on the wire and would otherwise be
+// misread as the answer to a later command. Once that happens, Run always
+// fails fast with an error wrapping ErrDesynced, without writing anything
+// or attempting to drain/re-sequence replies; the caller must Dial again.
 func (c *Client) Run(ctx context.Context, cmd string) ([]string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.desynced.Load() {
+		return nil, fmt.Errorf("run %q: %w", cmd, ErrDesynced)
+	}
 	if _, err := io.WriteString(c.stdin, cmd+"\n"); err != nil {
 		return nil, fmt.Errorf("write %q: %w", cmd, err)
 	}
