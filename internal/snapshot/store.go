@@ -6,9 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 const dirTimeFormat = "20060102T150405Z"
@@ -31,7 +31,9 @@ func (s *Store) EnsureDir() error {
 	if err := os.Chmod(s.Dir, 0o700); err != nil {
 		return err
 	}
-	os.MkdirAll(filepath.Join(s.Dir, "rejected"), 0o700)
+	if err := os.MkdirAll(filepath.Join(s.Dir, "rejected"), 0o700); err != nil {
+		return err
+	}
 	stale, _ := filepath.Glob(filepath.Join(s.Dir, "snap-*.tmp"))
 	for _, d := range stale {
 		os.RemoveAll(d)
@@ -97,52 +99,68 @@ func (s *Store) Stage(snap *Snapshot, contents map[string][]byte) (*Staged, erro
 	return &Staged{store: s, tmpDir: tmp, name: name}, nil
 }
 
-func (s *Store) writeCompressed(path string, data []byte) error {
-	f, err := os.OpenFile(path+".part", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+func (s *Store) writeCompressed(path string, data []byte) (err error) {
+	part := path + ".part"
+	f, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if err != nil {
+			os.Remove(part)
+		}
+	}()
 	w, err := s.Codec.NewWriter(f)
 	if err != nil {
 		f.Close()
 		return err
 	}
-	if _, err := w.Write(data); err != nil {
+	if _, err = w.Write(data); err != nil {
 		w.Close()
 		f.Close()
 		return err
 	}
-	if err := w.Close(); err != nil {
+	if err = w.Close(); err != nil {
 		f.Close()
 		return err
 	}
-	if err := f.Sync(); err != nil {
+	if err = f.Sync(); err != nil {
 		f.Close()
 		return err
 	}
-	f.Close()
-	return os.Rename(path+".part", path)
+	if err = f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(part, path)
 }
 
-func writeJSONAtomic(path string, v any) error {
+func writeJSONAtomic(path string, v any) (err error) {
 	b, err := json.MarshalIndent(v, "", " ")
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path+".part", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	part := path + ".part"
+	f, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(b); err != nil {
+	defer func() {
+		if err != nil {
+			os.Remove(part)
+		}
+	}()
+	if _, err = f.Write(b); err != nil {
 		f.Close()
 		return err
 	}
-	if err := f.Sync(); err != nil {
+	if err = f.Sync(); err != nil {
 		f.Close()
 		return err
 	}
-	f.Close()
-	return os.Rename(path+".part", path)
+	if err = f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(part, path)
 }
 
 func (st *Staged) Promote() (string, error) {
@@ -206,24 +224,20 @@ func (s *Store) ReadContent(dir string, p Pane) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("unknown codec %q", snap.ContentsCodec)
 	}
-	f, err := os.Open(filepath.Join(dir, "panes", p.ContentFile))
+	paneFile := filepath.Join(dir, "panes", p.ContentFile)
+	f, err := os.Open(paneFile)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 	r, err := codec.NewReader(f)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s: %w", paneFile, err)
 	}
 	defer r.Close()
-	var sb strings.Builder
-	buf := make([]byte, 32*1024)
-	for {
-		n, err := r.Read(buf)
-		sb.Write(buf[:n])
-		if err != nil {
-			break
-		}
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", paneFile, err)
 	}
-	return []byte(sb.String()), nil
+	return data, nil
 }

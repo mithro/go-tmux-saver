@@ -81,6 +81,78 @@ func TestStagePromoteHardlinkAndLast(t *testing.T) {
 	}
 }
 
+func TestReadContentCorruptGzipReturnsError(t *testing.T) {
+	gz, _ := LookupCodec("gzip")
+	st := &Store{Dir: t.TempDir(), Codec: gz}
+	if err := st.EnsureDir(); err != nil {
+		t.Fatal(err)
+	}
+	t1 := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	stg, err := st.Stage(twoPaneSnap(t1), map[string][]byte{"s_0_0": []byte("AAA"), "s_0_1": []byte("BBB")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir1, err := stg.Promote()
+	if err != nil {
+		t.Fatal(err)
+	}
+	last, _, err := st.Last()
+	if err != nil {
+		t.Fatal(err)
+	}
+	paneFile := filepath.Join(dir1, "panes", last.Sessions[0].Windows[0].Panes[1].ContentFile)
+	if err := os.WriteFile(paneFile, []byte("not gzip at all"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.ReadContent(dir1, last.Sessions[0].Windows[0].Panes[1]); err == nil {
+		t.Fatal("ReadContent on corrupt gzip should return a non-nil error")
+	}
+}
+
+func TestStageHardlinkFallbackWhenPrevFileMissing(t *testing.T) {
+	gz, _ := LookupCodec("gzip")
+	st := &Store{Dir: t.TempDir(), Codec: gz}
+	if err := st.EnsureDir(); err != nil {
+		t.Fatal(err)
+	}
+	t1 := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	stg, err := st.Stage(twoPaneSnap(t1), map[string][]byte{"s_0_0": []byte("AAA"), "s_0_1": []byte("BBB")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir1, err := stg.Promote()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate out-of-band pruning of pane 0's content file in snapshot 1.
+	if err := os.Remove(filepath.Join(dir1, "panes", "s_0_0.txt.gz")); err != nil {
+		t.Fatal(err)
+	}
+
+	t2 := t1.Add(10 * time.Minute)
+	stg2, err := st.Stage(twoPaneSnap(t2), map[string][]byte{"s_0_0": []byte("AAA"), "s_0_1": []byte("BBB")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir2, err := stg2.Promote()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	f0 := filepath.Join(dir2, "panes", "s_0_0.txt.gz")
+	if nlink(t, f0) != 1 {
+		t.Fatalf("pane with missing prev file should be written fresh (nlink=1), got %d", nlink(t, f0))
+	}
+	last, _, err := st.Last()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.ReadContent(dir2, last.Sessions[0].Windows[0].Panes[0])
+	if err != nil || string(got) != "AAA" {
+		t.Fatalf("ReadContent = %q %v", got, err)
+	}
+}
+
 func TestRejectAndDiscardLeaveLastAlone(t *testing.T) {
 	gz, _ := LookupCodec("gzip")
 	st := &Store{Dir: t.TempDir(), Codec: gz}
