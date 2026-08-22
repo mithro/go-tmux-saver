@@ -24,6 +24,12 @@ type Staged struct {
 	name   string // snap-<ts>
 }
 
+// EnsureDir creates the store's directory layout. It deliberately does NOT
+// sweep leftover snap-*.tmp staging directories: every subcommand calls
+// EnsureDir on start-up, with no lock held, so a sweep here could delete
+// the staging directory of a save that is still writing into it (RULING
+// R47). Sweeping is CleanStaleTmp's job, called by the save that holds the
+// data dir's exclusive lock.
 func (s *Store) EnsureDir() error {
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		return err
@@ -31,12 +37,23 @@ func (s *Store) EnsureDir() error {
 	if err := os.Chmod(s.Dir, 0o700); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Join(s.Dir, "rejected"), 0o700); err != nil {
+	return os.MkdirAll(filepath.Join(s.Dir, "rejected"), 0o700)
+}
+
+// CleanStaleTmp removes leftover snap-*.tmp staging directories (from a
+// save killed mid-Stage). The CALLER must hold the data dir's exclusive
+// save lock: that is what makes "leftover" a safe inference — a live save
+// holds the lock for its whole staging window, so nothing that survives to
+// here can still be in use.
+func (s *Store) CleanStaleTmp() error {
+	stale, err := filepath.Glob(filepath.Join(s.Dir, "snap-*.tmp"))
+	if err != nil {
 		return err
 	}
-	stale, _ := filepath.Glob(filepath.Join(s.Dir, "snap-*.tmp"))
 	for _, d := range stale {
-		os.RemoveAll(d)
+		if err := os.RemoveAll(d); err != nil {
+			return err
+		}
 	}
 	return nil
 }

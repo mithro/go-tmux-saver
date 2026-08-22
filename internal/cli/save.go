@@ -2,12 +2,15 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/mithro/go-tmux-saver/internal/collect"
@@ -56,6 +59,41 @@ func clearAlertsAndNotify(dataDir, host, mailTo, body string, units []string) []
 	return errs
 }
 
+// lockFile is the exclusive save lock inside the data dir (RULING R47).
+const lockFile = ".lock"
+
+// tryLockDataDir takes a NON-BLOCKING exclusive flock on <dir>/.lock. ok is
+// false (with a nil error) when another process already holds it — the
+// caller should skip rather than queue: these are periodic saves, and the
+// next timer tick is a better time to try than the tail of a save that is
+// still running.
+//
+// flock is per open file description, not per process, so this contends
+// correctly even against another save inside the same process (which is
+// how the tests drive it). The lock is released when release() runs or,
+// failing that, when the process exits and the fd is closed — so a crashed
+// save never leaves the store permanently locked.
+func tryLockDataDir(dir string) (release func(), ok bool, err error) {
+	f, err := os.OpenFile(filepath.Join(dir, lockFile), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+			f.Close()
+		})
+	}, true, nil
+}
+
 // SaveDeps bundles everything RunSave needs so it can be driven by real tmux
 // state (the "save" subcommand below) or by a tmuxctl.Fake (tests).
 type SaveDeps struct {
@@ -67,11 +105,28 @@ type SaveDeps struct {
 	Host    string
 	Clients int
 	Display func(msg string)
+	// Warn reports a non-fatal problem that must not be swallowed (a
+	// failed events.log append, an un-touchable fresh marker). nil logs to
+	// stderr.
+	Warn func(msg string)
+}
+
+// warn reports a non-fatal problem, defaulting to stderr when the caller
+// supplied no Warn hook.
+func (d SaveDeps) warn(msg string) {
+	if d.Warn != nil {
+		d.Warn(msg)
+		return
+	}
+	fmt.Fprintln(os.Stderr, "go-tmux-saver: warning:", msg)
 }
 
 // Outcome describes what one RunSave call did.
 type Outcome struct {
-	Kind             string // kept | unchanged | rejected-degenerate | skipped | error
+	// Kind is one of: kept | unchanged | rejected-degenerate | skipped |
+	// error. "skipped" means another save held the data dir's lock
+	// (RULING R47) — nothing was collected and nothing is wrong.
+	Kind             string
 	Dir              string
 	Panes, LastPanes int
 	Duration         time.Duration
@@ -89,7 +144,32 @@ func RunSave(ctx context.Context, d SaveDeps) (Outcome, error) {
 			e.Panes, e.Windows = snap.CountPanes()
 			e.Sessions = len(snap.Sessions)
 		}
-		snapshot.AppendEvent(d.Store.Dir, e)
+		if err := snapshot.AppendEvent(d.Store.Dir, e); err != nil {
+			d.warn("events.log: " + err.Error())
+		}
+	}
+
+	// RULING R47: one save at a time per data dir. Two concurrent saves
+	// would race over Stage/Promote, the `last` symlink and pruning; the
+	// loser skips rather than waits.
+	release, locked, err := tryLockDataDir(d.Store.Dir)
+	if err != nil {
+		logEv("error", nil, "", err.Error())
+		return Outcome{Kind: "error"}, err
+	}
+	if !locked {
+		logEv("skipped", nil, "", "save in progress")
+		return Outcome{Kind: "skipped", Duration: time.Since(start)}, nil
+	}
+	defer release()
+
+	// Safe only under the lock: any snap-*.tmp still on disk now cannot
+	// belong to a live save, because a live save holds this lock for its
+	// whole staging window. (EnsureDir used to do this sweep on every
+	// subcommand's bring-up, unlocked, where it could delete the staging
+	// directory of a save that was still writing into it.)
+	if err := d.Store.CleanStaleTmp(); err != nil {
+		d.warn("stale staging sweep: " + err.Error())
 	}
 
 	c := &collect.Collector{T: d.T, Procs: d.Procs, Reg: d.Reg, Allowlist: d.Cfg.Allowlist, Host: d.Host}
@@ -122,7 +202,9 @@ func RunSave(ctx context.Context, d SaveDeps) (Outcome, error) {
 		same := collect.Unchanged(last, snap)
 		stop()
 		if same {
-			snapshot.TouchFresh(d.Store.Dir)
+			if err := snapshot.TouchFresh(d.Store.Dir); err != nil {
+				d.warn("fresh marker: " + err.Error())
+			}
 			logEv("unchanged", snap, "", warnDetail)
 			d.Display(fmt.Sprintf("unchanged (%d panes)", newPanes))
 			return Outcome{Kind: "unchanged", Panes: newPanes, LastPanes: lastPanes, Duration: time.Since(start)}, nil
@@ -157,7 +239,9 @@ func RunSave(ctx context.Context, d SaveDeps) (Outcome, error) {
 		logEv("error", snap, "", err.Error())
 		return Outcome{Kind: "error"}, err
 	}
-	snapshot.TouchFresh(d.Store.Dir)
+	if err := snapshot.TouchFresh(d.Store.Dir); err != nil {
+		d.warn("fresh marker: " + err.Error())
+	}
 	logEv("kept", snap, filepath.Base(dir), warnDetail)
 	if _, perr := snapshot.Prune(d.Store.Dir, d.Cfg.Retention.Keep, d.Cfg.Retention.DailyDays, d.Cfg.Retention.Rejected, time.Now()); perr != nil {
 		// Pruning is best-effort housekeeping: a failure here doesn't
@@ -241,6 +325,14 @@ func init() {
 			fmt.Fprintln(stderr, "error:", err)
 			return 1
 		}
+		if o.Kind == "skipped" {
+			// RULING R47: another save holds the data dir's lock. Say so
+			// even for a manual save (the user pressed M-s and deserves to
+			// know why nothing happened), and exit 0 — nothing is wrong.
+			fmt.Fprintln(stdout, "skipped: save in progress")
+			return 0
+		}
+
 		summary := fmt.Sprintf("%s panes=%d last=%d %s", o.Kind, o.Panes, o.LastPanes, o.Duration.Round(time.Millisecond))
 		fmt.Fprintln(stdout, summary)
 

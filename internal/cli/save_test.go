@@ -278,3 +278,89 @@ func TestSaveCLIAutoSuccessClearsWatchMarkerToo(t *testing.T) {
 		t.Fatalf("ShouldSend(%s) after a successful save = false; the watchdog would stay silent forever", watchAlertUnit)
 	}
 }
+
+// TestRunSaveSkipsWhenAnotherSaveHoldsTheLock covers I6/RULING R47: two
+// saves against one data dir can collide (the 10-minute timer firing while
+// a manual M-s save is still running on a 41-pane server). The loser must
+// not run at all — concurrent Stage/Promote/prune against the same store,
+// and EnsureDir's snap-*.tmp sweep, would otherwise fight over the same
+// paths. It skips cleanly: a `skipped` event with detail "save in
+// progress", no error, exit 0 for the caller.
+func TestRunSaveSkipsWhenAnotherSaveHoldsTheLock(t *testing.T) {
+	d := deps(t, saveFake())
+
+	// Stand in for the other save: flock is per open file description, so
+	// a second open in this same process is genuinely contended.
+	release, ok, err := tryLockDataDir(d.Store.Dir)
+	if err != nil || !ok {
+		t.Fatalf("tryLockDataDir = %v %v, want the lock", ok, err)
+	}
+	defer release()
+
+	o, err := RunSave(context.Background(), d)
+	if err != nil {
+		t.Fatalf("RunSave: %v, want a clean skip", err)
+	}
+	if o.Kind != "skipped" {
+		t.Fatalf("Kind = %q, want %q", o.Kind, "skipped")
+	}
+	if len(d.T.(*tmuxctl.Fake).Calls) != 0 {
+		t.Errorf("the losing save must not touch tmux at all, got calls %v", d.T.(*tmuxctl.Fake).Calls)
+	}
+	ev, err := snapshot.TailEvents(d.Store.Dir, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ev) != 1 || ev[0].Outcome != "skipped" || ev[0].Detail != "save in progress" {
+		t.Fatalf("events %+v, want one skipped/save-in-progress event", ev)
+	}
+
+	// Once the other save finishes, the next one runs normally.
+	release()
+	o, err = RunSave(context.Background(), d)
+	if err != nil || o.Kind != "kept" {
+		t.Fatalf("after release: %+v %v, want a kept save", o, err)
+	}
+}
+
+// TestRunSaveDoesNotDeleteALiveSaveStagingDir covers the other half of
+// I6/RULING R47: the stale-snap-*.tmp sweep used to run in EnsureDir, on
+// every subcommand's bring-up and OUTSIDE any lock, so it could delete the
+// staging directory of a save that was still writing into it. The sweep now
+// happens inside RunSave with the lock held, and EnsureDir leaves tmp dirs
+// alone.
+func TestRunSaveDoesNotDeleteALiveSaveStagingDir(t *testing.T) {
+	d := deps(t, saveFake())
+	live := filepath.Join(d.Store.Dir, "snap-20260822T120000Z.tmp")
+	if err := os.MkdirAll(live, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	// The other save holds the lock, so this one skips without sweeping.
+	release, ok, err := tryLockDataDir(d.Store.Dir)
+	if err != nil || !ok {
+		t.Fatalf("tryLockDataDir = %v %v", ok, err)
+	}
+	if o, err := RunSave(context.Background(), d); err != nil || o.Kind != "skipped" {
+		t.Fatalf("RunSave = %+v %v, want skipped", o, err)
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Fatalf("a skipping save must not delete the lock holder's staging dir: %v", err)
+	}
+	// EnsureDir (every subcommand's bring-up) must not delete it either.
+	if err := d.Store.EnsureDir(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Fatalf("EnsureDir deleted a live save's staging dir: %v", err)
+	}
+
+	// With the lock free, the save owns the store and sweeps it.
+	release()
+	if o, err := RunSave(context.Background(), d); err != nil || o.Kind != "kept" {
+		t.Fatalf("RunSave = %+v %v, want kept", o, err)
+	}
+	if _, err := os.Stat(live); !os.IsNotExist(err) {
+		t.Fatalf("a save holding the lock should sweep stale staging dirs (stat err = %v)", err)
+	}
+}
