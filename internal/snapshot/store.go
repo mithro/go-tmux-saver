@@ -211,11 +211,11 @@ func (s *Store) Load(dir string) (*Snapshot, error) {
 	return &snap, nil
 }
 
-// ReadContent decodes a pane's scrollback using the codec named in the snapshot.
+// ReadContent decodes a pane's scrollback using the codec named in the
+// snapshot. Reading many panes from the same dir one at a time via this
+// method re-parses dir's layout.json on every call just to learn the codec
+// name — for that case, ContentReader parses it once up front instead.
 func (s *Store) ReadContent(dir string, p Pane) ([]byte, error) {
-	if p.ContentFile == "" {
-		return nil, os.ErrNotExist
-	}
 	snap, err := s.Load(dir)
 	if err != nil {
 		return nil, err
@@ -223,6 +223,30 @@ func (s *Store) ReadContent(dir string, p Pane) ([]byte, error) {
 	codec, ok := LookupCodec(snap.ContentsCodec)
 	if !ok {
 		return nil, fmt.Errorf("unknown codec %q", snap.ContentsCodec)
+	}
+	return readPaneContent(dir, codec, p)
+}
+
+// ContentReader loads dir's snapshot once to resolve its contents codec, and
+// returns a function that decodes any of that snapshot's panes' scrollback —
+// for reading many panes from one dir (e.g. restoring a whole snapshot),
+// this avoids ReadContent's per-call re-parse of layout.json.
+func (s *Store) ContentReader(dir string) (func(p Pane) ([]byte, error), error) {
+	snap, err := s.Load(dir)
+	if err != nil {
+		return nil, err
+	}
+	codec, ok := LookupCodec(snap.ContentsCodec)
+	if !ok {
+		return nil, fmt.Errorf("unknown codec %q", snap.ContentsCodec)
+	}
+	return func(p Pane) ([]byte, error) { return readPaneContent(dir, codec, p) }, nil
+}
+
+// readPaneContent decodes one pane's content file (in dir/panes/) with codec.
+func readPaneContent(dir string, codec Codec, p Pane) ([]byte, error) {
+	if p.ContentFile == "" {
+		return nil, os.ErrNotExist
 	}
 	paneFile := filepath.Join(dir, "panes", p.ContentFile)
 	f, err := os.Open(paneFile)

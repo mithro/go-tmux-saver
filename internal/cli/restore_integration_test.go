@@ -41,15 +41,13 @@ func writeTestConfig(t *testing.T, sock string) string {
 func waitFor(t *testing.T, timeout time.Duration, check func() (ok bool, state string)) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
-	var last string
 	for {
 		ok, state := check()
 		if ok {
 			return
 		}
-		last = state
 		if time.Now().After(deadline) {
-			t.Fatalf("condition not met within %s; last observed state:\n%s", timeout, last)
+			t.Fatalf("condition not met within %s; last observed state:\n%s", timeout, state)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}

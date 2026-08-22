@@ -123,30 +123,10 @@ func init() {
 		if err := fs.Parse(args); err != nil {
 			return 2
 		}
-		cfg, err := config.Load(*cfgPath)
-		if err == nil {
-			if *socket != "" {
-				cfg.Socket = *socket
-			}
-			if *dataDir != "" {
-				cfg.DataDir = *dataDir
-			}
-			err = cfg.Validate()
-		}
-		if err != nil {
-			fmt.Fprintln(stderr, "config:", err)
-			return 2
-		}
-
-		codec, ok := snapshot.LookupCodec(cfg.Contents.Codec)
-		if !ok {
-			fmt.Fprintf(stderr, "config: unknown codec %q\n", cfg.Contents.Codec)
-			return 2
-		}
-		store := &snapshot.Store{Dir: cfg.DataDir, Codec: codec}
-		if err := store.EnsureDir(); err != nil {
-			fmt.Fprintln(stderr, err)
-			return 1
+		cfg, store, msg, code := commonSetup(*cfgPath, *socket, *dataDir)
+		if code != 0 {
+			fmt.Fprintln(stderr, msg)
+			return code
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
