@@ -67,7 +67,7 @@ update}`, `alert`.
 | `go-tmux-saver.timer/.service` (user) | Periodic `save --auto`, `Persistent=true`, runs attached or detached. |
 | `go-tmux-saver-watch.timer/.service` (user) | Hourly `status --check-fresh`; mails if the newest good save is older than 3× the interval. |
 | `go-tmux-saver-alert@.service` (user) | `OnFailure=` target; `go-tmux-saver alert` mails the failure via `sendmail -t`. |
-| `tmux-server.service.d/50-go-tmux-saver.conf` (drop-in) | `ExecStartPost=go-tmux-saver restore --on-start` on the existing, unmodified unit. |
+| `tmux-server.service.d/50-go-tmux-saver.conf` (drop-in) | `ExecStartPost=-go-tmux-saver restore --on-start` on the existing, unmodified unit. |
 | `~/.config/go-tmux-saver/tmux.conf` | Generated keybinding snippet (`M-s`, `M-r`) sourced from the rcfiles tmux config by one guarded line. |
 | `~/.config/go-tmux-saver/config.json` | Generated defaults; the only file a human edits. |
 | `~/.local/share/go-tmux-saver/` | `snap-<UTC>/` directories (`layout.json` + `panes/` one file per pane, hardlinked when unchanged), `last` symlink, `rejected/`, `events.log`, freshness marker. |
@@ -117,7 +117,7 @@ holding `layout.json` (`"schema": 1`, small — structure only) and `panes/`
                      content_sha256, content_file,
                      restore: { kind: "shell"|"argv"|"claude", argv: [...],
                                 claude_session: "<uuid>" } } ] } ] } ],
-  client: { session },                # last attached client's session
+  client: { session },                # most recently active NON-control client's session at save time (informational; restore never acts on it)
   stats: { panes, windows, sessions, duration_ms } }
 ```
 
@@ -194,13 +194,23 @@ for hard errors (tmux reachable but a command/IO failure, write failure).
 
 **Watchdog.** `go-tmux-saver-watch.timer` hourly → `status --check-fresh`:
 non-zero (→ alert mail) when the newest `kept|unchanged` is older than 3× the
-configured interval. This is the detector the 23-day blackout lacked.
+configured interval. This is the detector the 23-day blackout lacked. Alert mails are
+rate-limited per unit (one per failure streak); a successful `save --auto`
+clears both units' streak markers (and mails one recovery per cleared
+marker), and a fresh `--check-fresh` clears the watch unit's marker — so the
+watchdog can never silence itself after its first alert.
 
 **Restore on start.** The drop-in adds
-`ExecStartPost=go-tmux-saver restore --on-start` after the existing
+`ExecStartPost=-go-tmux-saver restore --on-start` after the existing
 `remain-on-exit` line of `tmux-server.service`. `--on-start` proceeds only when
 the server is *seed-only* (exactly the seed session `default` with the single
-seed window); otherwise it logs `skipped: server not seed-only` and exits 0.
+seed window); otherwise it logs `skipped: server not seed-only` and exits 0. Under
+`--on-start` the command is never allowed to fail the tmux server unit: "no
+snapshot to restore" is `skipped` (exit 0), a partial restore prints its
+errors and records `errors=E` in the event but still exits 0, and the
+drop-in uses `ExecStartPost=-…` as a second guard; only hard failures (store
+unreadable, transport error) exit non-zero. (`--merge` keeps exit 1 on
+errors.)
 No time-based heuristic. zprofile's login clone only needs `default` to exist,
 which it does before `ExecStartPost`, so logins during a restore simply see
 windows appear.
@@ -230,8 +240,9 @@ windows appear.
   fed to the shell as keystrokes (`paste-buffer` would execute every line).
 - Restore commands are typed as ONE shell-quoted `send-keys` argument (tmux
   concatenates multiple `send-keys` arguments with no separator).
-- The last attached client's session is selected; grouped clones are never
-  restored (login machinery recreates them).
+- Restore does not switch any client's session (the recorded
+  `client.session` is informational only); grouped clones are never restored
+  (login machinery recreates them).
 - Idempotent: re-running completes a partial restore; the plan and every
   create/relocate/skip is logged.
 
@@ -252,7 +263,9 @@ file; run 'go-tmux-saver setup update'`. Unmanaged files are never touched.
   snippet, `config.json` defaults) to stdout or a directory.
 - `setup install` — write them atomically to the real locations
   (`$XDG_CONFIG_HOME/systemd/user/`, `$XDG_CONFIG_HOME/go-tmux-saver/`),
-  `systemctl --user daemon-reload`, enable + start the timers. Idempotent.
+  `systemctl --user daemon-reload`, enable + start the timers. Idempotent: an
+  existing `config.json` is never overwritten by `install`, `generate` or
+  `update` (`generate` with no `--dir` prints to stdout).
 - `setup validate [--json]` — check: managed files present and byte-identical
   to the expected rendering (drift diff), `systemd-analyze --user verify` on
   the units, timers enabled + active, the drop-in visible in
@@ -304,7 +317,9 @@ branches, always-suggest-update-branch, tag ruleset enforcing `vXX.ZZZ`.
 ## 8. Testing
 
 - The control-mode transport is an interface; unit tests use a fake backed by
-  **recorded transcripts** from real servers (tmux next-3.8 and 3.5a) as golden
+  **recorded transcripts** from real servers (tmux next-3.8; a 3.5a transcript
+  is a pre-rollout TODO for big-storage in Plan 2 — until then 3.5a support is
+  by construction, not by test) as golden
   files, so parsing is tested against both versions without tmux in the loop.
 - Table-tested pure cores: guard decision (ported from
   `resurrect-post-save.is_degenerate`), `/proc` tree resolution on fixture
