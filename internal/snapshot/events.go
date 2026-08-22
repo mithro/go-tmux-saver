@@ -21,6 +21,10 @@ type Event struct {
 const eventsFile = "events.log"
 const freshFile = "fresh"
 
+func sanitizeField(s string) string {
+	return strings.NewReplacer("\t", " ", "\n", " ", "\r", " ").Replace(s)
+}
+
 func AppendEvent(dir string, e Event) error {
 	f, err := os.OpenFile(filepath.Join(dir, eventsFile), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -28,7 +32,7 @@ func AppendEvent(dir string, e Event) error {
 	}
 	defer f.Close()
 	_, err = fmt.Fprintf(f, "%s\t%s\tpanes=%d\twindows=%d\tsessions=%d\tclients=%d\tduration_ms=%d\t%s\t%s\n",
-		e.Time.UTC().Format(time.RFC3339), e.Outcome, e.Panes, e.Windows, e.Sessions, e.Clients, e.DurationMS, e.File, e.Detail)
+		e.Time.UTC().Format(time.RFC3339), e.Outcome, e.Panes, e.Windows, e.Sessions, e.Clients, e.DurationMS, sanitizeField(e.File), sanitizeField(e.Detail))
 	return err
 }
 
