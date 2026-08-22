@@ -27,31 +27,31 @@ type Session struct {
 }
 
 type Window struct {
-	Index            int    `json:"index"`
-	Name             string `json:"name"`
-	Layout           string `json:"layout"`
-	Active           bool   `json:"active"`
-	Flags            string `json:"flags"`
-	AutomaticRename  bool   `json:"automatic_rename"`
-	Panes            []Pane `json:"panes"`
+	Index           int    `json:"index"`
+	Name            string `json:"name"`
+	Layout          string `json:"layout"`
+	Active          bool   `json:"active"`
+	Flags           string `json:"flags"`
+	AutomaticRename bool   `json:"automatic_rename"`
+	Panes           []Pane `json:"panes"`
 }
 
 type Pane struct {
-	Index        int     `json:"index"`
-	ID           string  `json:"id"`
-	Cwd          string  `json:"cwd"`
-	Title        string  `json:"title"`
-	Active       bool    `json:"active"`
-	HistoryLines int     `json:"history_lines"`
-	ContentSHA256 string `json:"content_sha256,omitempty"`
-	ContentFile   string `json:"content_file,omitempty"`
+	Index         int     `json:"index"`
+	ID            string  `json:"id"`
+	Cwd           string  `json:"cwd"`
+	Title         string  `json:"title"`
+	Active        bool    `json:"active"`
+	HistoryLines  int     `json:"history_lines"`
+	ContentSHA256 string  `json:"content_sha256,omitempty"`
+	ContentFile   string  `json:"content_file,omitempty"`
 	Restore       Restore `json:"restore"`
 }
 
 type Restore struct {
-	Kind           string   `json:"kind"`
-	Argv           []string `json:"argv,omitempty"`
-	ClaudeSession  string   `json:"claude_session,omitempty"`
+	Kind          string   `json:"kind"`
+	Argv          []string `json:"argv,omitempty"`
+	ClaudeSession string   `json:"claude_session,omitempty"`
 }
 
 type ClientState struct {
