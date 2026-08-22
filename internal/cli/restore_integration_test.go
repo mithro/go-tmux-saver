@@ -34,6 +34,27 @@ func writeTestConfig(t *testing.T, sock string) string {
 	return p
 }
 
+// waitFor polls check every 50ms until it reports ok, or fails the test once
+// timeout elapses, reporting the last observed state. Used in place of fixed
+// sleeps so the test doesn't flake under load (RULING R25) while still
+// failing fast once tmux genuinely never reaches the expected state.
+func waitFor(t *testing.T, timeout time.Duration, check func() (ok bool, state string)) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	var last string
+	for {
+		ok, state := check()
+		if ok {
+			return
+		}
+		last = state
+		if time.Now().After(deadline) {
+			t.Fatalf("condition not met within %s; last observed state:\n%s", timeout, last)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // TestSaveRestoreRoundTrip proves the whole pipeline against a real tmux
 // server: save a layout beyond the seed window, kill it live, then
 // `restore --on-start` must recreate it (relocated windows included) and
@@ -41,11 +62,42 @@ func writeTestConfig(t *testing.T, sock string) string {
 func TestSaveRestoreRoundTrip(t *testing.T) {
 	sock := tmuxctl.StartTestServer(t)
 	run := func(args ...string) { exec.Command("tmux", append([]string{"-L", sock}, args...)...).Run() }
+	listWindows := func() string {
+		out, _ := exec.Command("tmux", "-L", sock, "list-windows", "-a", "-F", "#{session_name}:#{window_index} #{window_name} #{window_panes}").Output()
+		return string(out)
+	}
+	paneCmd := func(target string) string {
+		out, _ := exec.Command("tmux", "-L", sock, "display-message", "-p", "-t", target, "#{pane_current_command}").Output()
+		return strings.TrimSpace(string(out))
+	}
+	wantWindows := []string{"default:0 h 1", "default:1 editor 2", "net:0 swcfg 1"}
+	haveAllWindows := func(got string) bool {
+		for _, want := range wantWindows {
+			if !strings.Contains(got, want) {
+				return false
+			}
+		}
+		return true
+	}
+
 	run("new-window", "-d", "-t", "default:1", "-n", "editor", "-c", "/tmp")
 	run("split-window", "-d", "-t", "default:1", "-c", "/")
 	run("new-session", "-d", "-s", "net", "-n", "swcfg", "-c", "/tmp")
 	run("send-keys", "-t", "net:0", "tail -f /dev/null", "Enter")
-	time.Sleep(300 * time.Millisecond)
+
+	// Wait for the pre-save layout to fully settle: all three windows present
+	// with their expected pane counts, and "tail" actually exec'd in net:0.0
+	// (not still "bash" mid-fork), before snapshotting it.
+	waitFor(t, 5*time.Second, func() (bool, string) {
+		got := listWindows()
+		if !haveAllWindows(got) {
+			return false, got
+		}
+		if cmd := paneCmd("net:0.0"); cmd != "tail" {
+			return false, got + "net:0.0 pane_current_command=" + cmd + "\n"
+		}
+		return true, ""
+	})
 
 	dataDir := t.TempDir()
 	cfgFile := writeTestConfig(t, sock)
@@ -58,16 +110,23 @@ func TestSaveRestoreRoundTrip(t *testing.T) {
 	if code := Run([]string{"restore", "--on-start", "--config", cfgFile}, io.Discard, os.Stderr); code != 0 {
 		t.Fatal("restore failed")
 	}
-	out, _ := exec.Command("tmux", "-L", sock, "list-windows", "-a", "-F", "#{session_name}:#{window_index} #{window_name} #{window_panes}").Output()
-	got := string(out)
-	for _, want := range []string{"default:0 h 1", "default:1 editor 2", "net:0 swcfg 1"} {
+
+	waitFor(t, 5*time.Second, func() (bool, string) {
+		got := listWindows()
+		return haveAllWindows(got), got
+	})
+	got := listWindows()
+	for _, want := range wantWindows {
 		if !strings.Contains(got, want) {
 			t.Fatalf("after restore missing %q:\n%s", want, got)
 		}
 	}
-	time.Sleep(500 * time.Millisecond)
-	cmd, _ := exec.Command("tmux", "-L", sock, "display-message", "-p", "-t", "net:0.0", "#{pane_current_command}").Output()
-	if strings.TrimSpace(string(cmd)) != "tail" {
+
+	waitFor(t, 5*time.Second, func() (bool, string) {
+		cmd := paneCmd("net:0.0")
+		return cmd == "tail", cmd
+	})
+	if cmd := paneCmd("net:0.0"); cmd != "tail" {
 		t.Fatalf("tail should have been relaunched in net:0.0, got %q", cmd)
 	}
 }
