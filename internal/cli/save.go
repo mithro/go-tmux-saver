@@ -11,10 +11,16 @@ import (
 
 	"github.com/mithro/go-tmux-saver/internal/collect"
 	"github.com/mithro/go-tmux-saver/internal/config"
+	"github.com/mithro/go-tmux-saver/internal/mail"
 	"github.com/mithro/go-tmux-saver/internal/procs"
 	"github.com/mithro/go-tmux-saver/internal/snapshot"
 	"github.com/mithro/go-tmux-saver/internal/tmuxctl"
 )
+
+// alertUnit is the systemd unit name go-tmux-saver-alert@.service is
+// instantiated with for the save/watch services (see the Task 16 templates)
+// and thus the RateLimiter key a save --auto success must clear.
+const alertUnit = "go-tmux-saver.service"
 
 // SaveDeps bundles everything RunSave needs so it can be driven by real tmux
 // state (the "save" subcommand below) or by a tmuxctl.Fake (tests).
@@ -172,7 +178,21 @@ func init() {
 			fmt.Fprintln(stderr, "error:", err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "%s panes=%d last=%d %s\n", o.Kind, o.Panes, o.LastPanes, o.Duration.Round(time.Millisecond))
+		summary := fmt.Sprintf("%s panes=%d last=%d %s", o.Kind, o.Panes, o.LastPanes, o.Duration.Round(time.Millisecond))
+		fmt.Fprintln(stdout, summary)
+
+		if *auto && (o.Kind == "kept" || o.Kind == "unchanged") {
+			rl := mail.RateLimiter{Dir: store.Dir}
+			if rl.Clear(alertUnit) {
+				subject := fmt.Sprintf("[go-tmux-saver] %s: %s recovered", host, alertUnit)
+				body := "save succeeded: " + summary
+				// A sendmail failure here must not change the save's own
+				// exit code — the save already succeeded; log and move on.
+				if err := mail.Send(mail.Sendmail, cfg.MailTo, subject, body); err != nil {
+					fmt.Fprintln(stderr, "alert: recovery mail:", err)
+				}
+			}
+		}
 		return 0
 	}})
 }

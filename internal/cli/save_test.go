@@ -12,6 +12,7 @@ import (
 
 	"github.com/mithro/go-tmux-saver/internal/collect"
 	"github.com/mithro/go-tmux-saver/internal/config"
+	"github.com/mithro/go-tmux-saver/internal/mail"
 	"github.com/mithro/go-tmux-saver/internal/procs"
 	"github.com/mithro/go-tmux-saver/internal/snapshot"
 	"github.com/mithro/go-tmux-saver/internal/tmuxctl"
@@ -182,5 +183,54 @@ func TestSaveCLIAutoBadSeedSessionErrors(t *testing.T) {
 	}
 	if !strings.Contains(ev[0].Detail, "nonexistent-session") {
 		t.Fatalf("event detail = %q, want it to contain %q (proving the error came from Dial, not Collect)", ev[0].Detail, "nonexistent-session")
+	}
+}
+
+// TestSaveCLIAutoSuccessSendsRecoveryMailWhenMarkerPresent covers the
+// save-success recovery hook: a pre-created rate-limit marker for
+// "go-tmux-saver.service" (as `alert` would have left behind after an
+// earlier failure) must be cleared by a successful `save --auto`
+// (kept/unchanged), sending exactly one recovery mail through the same
+// injectable sender the alert command uses. A second successful save with no
+// marker left must send nothing more.
+func TestSaveCLIAutoSuccessSendsRecoveryMailWhenMarkerPresent(t *testing.T) {
+	s := fakeSendmail(t)
+	sock := tmuxctl.StartTestServer(t)
+	cfgPath := writeConfig(t, `{"mail_to": "ops@example.com"}`)
+	dataDir := t.TempDir()
+
+	rl := mail.RateLimiter{Dir: dataDir}
+	if !rl.ShouldSend("go-tmux-saver.service", time.Now()) {
+		t.Fatal("setup: ShouldSend = false, want true (fresh marker)")
+	}
+
+	var out, errb bytes.Buffer
+	code := Run([]string{"save", "--auto", "--no-display", "--config", cfgPath, "--data-dir", dataDir, "--socket", sock}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	if !strings.HasPrefix(out.String(), "kept") {
+		t.Fatalf("stdout = %q, want prefix %q", out.String(), "kept")
+	}
+	if s.count() != 1 {
+		t.Fatalf("sendmail calls = %d, want 1", s.count())
+	}
+	if !strings.Contains(s.last(), "go-tmux-saver.service recovered") || !strings.Contains(s.last(), "To: ops@example.com") {
+		t.Fatalf("message = %q, want a recovered subject for the unit and To: ops@example.com", s.last())
+	}
+	if !strings.Contains(s.last(), "save succeeded:") {
+		t.Fatalf("message = %q, want a body starting with %q", s.last(), "save succeeded:")
+	}
+
+	// The marker is gone now, so a second successful save must not send
+	// another recovery mail.
+	out.Reset()
+	errb.Reset()
+	code = Run([]string{"save", "--auto", "--no-display", "--config", cfgPath, "--data-dir", dataDir, "--socket", sock}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("second save exit %d, want 0; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	if s.count() != 1 {
+		t.Fatalf("sendmail calls after second save = %d, want still 1 (no marker to clear)", s.count())
 	}
 }
