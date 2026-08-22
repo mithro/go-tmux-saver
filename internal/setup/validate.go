@@ -129,6 +129,13 @@ func validateUnitsVerify(env Env, files []Managed) (Drift, bool) {
 // tmux-server.service actually shows the drop-in's ExecStartPost, i.e. that
 // the drop-in file on disk is the one systemd is using — not just that the
 // file exists (that's validateFile's "missing"/"differs" job).
+//
+// The match is on the command text alone, deliberately independent of how
+// systemd renders the line's flags: the drop-in prefixes ExecStartPost with
+// '-' (RULING R45), which `systemctl show` reports as an extra
+// "flags=ignore-failure"/"ignore_errors=yes" in the same record. Whether
+// the '-' is present on disk is validateFile's byte-comparison to answer,
+// not this liveness probe's.
 func validateDropinEffective(env Env) (Drift, bool) {
 	out, err := env.Systemctl("--user", "show", "tmux-server.service", "-p", "ExecStartPost")
 	if err == nil && strings.Contains(out, "restore --on-start") {

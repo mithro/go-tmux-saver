@@ -188,7 +188,7 @@ func TestRestoreCLISummaryString(t *testing.T) {
 // any planned creation failed, restoreSummary appends the error-count
 // suffix and calls for exit 1; with no errors, no suffix and exit 0.
 func TestRestoreSummaryErrorsSuffixAndExitCode(t *testing.T) {
-	line, code := restoreSummary(RestoreOutcome{Sessions: 1, Windows: 1, Relocated: 0, Skipped: 0, Errors: 1})
+	line, code := restoreSummary(RestoreOutcome{Sessions: 1, Windows: 1, Relocated: 0, Skipped: 0, Errors: 1}, false)
 	if code != 1 {
 		t.Errorf("exit code = %d, want 1", code)
 	}
@@ -196,7 +196,7 @@ func TestRestoreSummaryErrorsSuffixAndExitCode(t *testing.T) {
 		t.Errorf("summary = %q, want it to end with the errors suffix", line)
 	}
 
-	line0, code0 := restoreSummary(RestoreOutcome{Sessions: 1, Windows: 2, Relocated: 0, Skipped: 1})
+	line0, code0 := restoreSummary(RestoreOutcome{Sessions: 1, Windows: 2, Relocated: 0, Skipped: 1}, false)
 	if code0 != 0 {
 		t.Errorf("exit code = %d, want 0", code0)
 	}
@@ -294,7 +294,7 @@ func TestRunRestoreCountsErrorsFromFailedCreate(t *testing.T) {
 		t.Errorf("Windows = %d, want 0 (the only planned window failed)", o.Windows)
 	}
 
-	line, code := restoreSummary(o)
+	line, code := restoreSummary(o, false)
 	if code != 1 {
 		t.Errorf("restoreSummary exit code = %d, want 1", code)
 	}
@@ -311,5 +311,68 @@ func TestRunRestoreCountsErrorsFromFailedCreate(t *testing.T) {
 	}
 	if !strings.Contains(ev[0].Detail, "errors=1") {
 		t.Errorf("event detail = %q, want it to contain %q", ev[0].Detail, "errors=1")
+	}
+}
+
+// TestRestoreCLIOnStartNoSnapshotSkips covers C2/RULING R45: at boot the
+// drop-in runs `restore --on-start` before any snapshot has ever been
+// taken. That must be a clean skip (exit 0 + a "skipped" event), not an
+// exit-1 failure that makes systemd mark tmux-server.service failed.
+func TestRestoreCLIOnStartNoSnapshotSkips(t *testing.T) {
+	sock := tmuxctl.StartTestServer(t) // seed-only: session "default", window "h"
+	cfgFile := writeTestConfig(t, sock)
+	dataDir := t.TempDir() // empty: no snapshots, no "last" symlink
+
+	var out, errb bytes.Buffer
+	code := Run([]string{"restore", "--on-start", "--config", cfgFile, "--data-dir", dataDir}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	if !strings.Contains(out.String(), "skipped: no snapshot to restore") {
+		t.Fatalf("stdout = %q, want the no-snapshot skip message", out.String())
+	}
+	ev, err := snapshot.TailEvents(dataDir, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ev) != 1 || ev[0].Outcome != "skipped" || !strings.Contains(ev[0].Detail, "no snapshot") {
+		t.Fatalf("events %+v, want one skipped/no-snapshot event", ev)
+	}
+}
+
+// TestRestoreCLIWithoutOnStartNoSnapshotErrors is R45's other half: a
+// hand-run restore with nothing to restore from is still an error (exit 1)
+// — only the boot-time --on-start path downgrades it to a skip.
+func TestRestoreCLIWithoutOnStartNoSnapshotErrors(t *testing.T) {
+	sock := tmuxctl.StartTestServer(t)
+	cfgFile := writeTestConfig(t, sock)
+	dataDir := t.TempDir()
+
+	var out, errb bytes.Buffer
+	code := Run([]string{"restore", "--config", cfgFile, "--data-dir", dataDir}, &out, &errb)
+	if code != 1 {
+		t.Fatalf("exit %d, want 1; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+}
+
+// TestRestoreSummaryOnStartPartialExitsZero covers C2/RULING R45's
+// partial-restore half: under --on-start a partly-failed restore still
+// reports its errors in the summary (and in the event detail) but must exit
+// 0, so systemd never fails tmux-server.service over it. A manual/--merge
+// restore keeps exit 1.
+func TestRestoreSummaryOnStartPartialExitsZero(t *testing.T) {
+	o := RestoreOutcome{Sessions: 1, Windows: 1, Errors: 2}
+
+	line, code := restoreSummary(o, true)
+	if code != 0 {
+		t.Errorf("--on-start exit code = %d, want 0", code)
+	}
+	if !strings.HasSuffix(line, "(2 errors — see events.log)") {
+		t.Errorf("--on-start summary = %q, want the errors suffix still present", line)
+	}
+
+	_, mergeCode := restoreSummary(o, false)
+	if mergeCode != 1 {
+		t.Errorf("--merge exit code = %d, want 1", mergeCode)
 	}
 }

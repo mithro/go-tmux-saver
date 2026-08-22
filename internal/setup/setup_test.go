@@ -662,3 +662,41 @@ func TestUpdateNeverOverwritesExistingConfigJSON(t *testing.T) {
 		t.Fatalf("Validate with a custom-but-valid %s = %+v, want none", RelConfigJSON, drifts)
 	}
 }
+
+// TestRenderDropinIgnoresExecStartPostFailure covers C2/RULING R45: the
+// tmux-server.service drop-in must prefix its ExecStartPost with '-' so a
+// non-zero restore can never make systemd fail tmux-server.service itself.
+func TestRenderDropinIgnoresExecStartPostFailure(t *testing.T) {
+	files := renderTestFiles(t)
+	var dropin Managed
+	for _, f := range files {
+		if f.Rel == RelTmuxDropin {
+			dropin = f
+		}
+	}
+	want := "ExecStartPost=-/usr/bin/go-tmux-saver restore --on-start\n"
+	if !bytes.Contains(dropin.Content, []byte(want)) {
+		t.Fatalf("%s content = %s, want it to contain %q", RelTmuxDropin, dropin.Content, want)
+	}
+}
+
+// TestValidateDropinToleratesIgnoreErrorsPrefix covers C2's validator half:
+// with the '-' prefix in place, `systemctl show -p ExecStartPost` reports
+// ignore_errors=yes, and validate must still recognise the drop-in as
+// effective rather than reporting dropin-missing drift.
+func TestValidateDropinToleratesIgnoreErrorsPrefix(t *testing.T) {
+	home := t.TempDir()
+	files := renderTestFiles(t)
+	fake := &fakeSystemctl{
+		showOut: "ExecStartPost={ path=/usr/bin/go-tmux-saver ; argv[]=/usr/bin/go-tmux-saver restore --on-start ; flags=ignore-failure ; ignore_errors=yes }\n",
+	}
+	env := testEnv(home, fake)
+	if err := Install(env, files); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	for _, d := range Validate(env, files) {
+		if d.Kind == "dropin-missing" {
+			t.Fatalf("dropin-missing drift with the '-' (ignore_errors=yes) form: %+v", d)
+		}
+	}
+}

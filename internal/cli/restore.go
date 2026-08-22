@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -53,7 +54,7 @@ type RestoreDeps struct {
 
 // RestoreOutcome describes what one RunRestore call did.
 type RestoreOutcome struct {
-	Kind                                  string // restored | skipped-not-seed-only
+	Kind                                  string // restored | skipped-not-seed-only | skipped-no-snapshot
 	Sessions, Windows, Relocated, Skipped int
 	Errors                                int // planned creations that failed (see restore.Report.Notes)
 	Notes                                 []string
@@ -93,6 +94,21 @@ func RunRestore(ctx context.Context, d RestoreDeps) (RestoreOutcome, error) {
 		snap, lastDir, err = d.Store.Last()
 	}
 	if err != nil {
+		// RULING R45: at boot the tmux-server.service drop-in runs
+		// `restore --on-start` before any snapshot has ever been taken.
+		// "there is nothing to restore from" is a normal state there, not a
+		// failure, so it is logged as a skip and exits 0 — otherwise systemd
+		// marks tmux-server.service failed on every first boot. Only the
+		// genuinely-absent case (no `last` symlink) counts: a `last` that
+		// exists but can't be read (corrupt layout.json, unreadable store)
+		// is a hard failure even under --on-start.
+		if d.OnStart && errors.Is(err, os.ErrNotExist) {
+			snapshot.AppendEvent(d.Store.Dir, snapshot.Event{
+				Time: time.Now(), Outcome: "skipped", Clients: live.Clients,
+				DurationMS: time.Since(start).Milliseconds(), Detail: "no snapshot to restore",
+			})
+			return RestoreOutcome{Kind: "skipped-no-snapshot", Duration: time.Since(start)}, nil
+		}
 		return RestoreOutcome{}, fmt.Errorf("no snapshot to restore from: %w", err)
 	}
 
@@ -150,9 +166,13 @@ func RunRestore(ctx context.Context, d RestoreDeps) (RestoreOutcome, error) {
 	}
 
 	detail := fmt.Sprintf("sessions=%d windows=%d relocated=%d skipped=%d errors=%d", o.Sessions, o.Windows, o.Relocated, o.Skipped, o.Errors)
+	// Panes comes from the snapshot that was restored (the Report counts
+	// windows, not panes): a "restore" event with panes=0 was indistinguishable
+	// from a restore that produced nothing.
+	panes, _ := snap.CountPanes()
 	snapshot.AppendEvent(d.Store.Dir, snapshot.Event{
 		Time: time.Now(), Outcome: "restore",
-		Sessions: o.Sessions, Windows: o.Windows, Clients: live.Clients,
+		Panes: panes, Sessions: o.Sessions, Windows: o.Windows, Clients: live.Clients,
 		DurationMS: o.Duration.Milliseconds(), Detail: detail,
 	})
 
@@ -165,11 +185,20 @@ func RunRestore(ctx context.Context, d RestoreDeps) (RestoreOutcome, error) {
 // appends an "(N errors — see events.log)" suffix and calls for exit 1;
 // otherwise exit 0. Split out from the "restore" subcommand's closure so
 // this formatting/exit-code decision has its own direct unit test.
-func restoreSummary(o RestoreOutcome) (line string, exitCode int) {
+//
+// RULING R45: under --on-start the suffix is still printed (and the error
+// count still reaches events.log) but the exit code stays 0. That run is
+// systemd's ExecStartPost= for tmux-server.service, and a partial restore
+// must not fail the tmux server itself; exit 1 there is reserved for hard
+// failures (unreadable store, transport error) that RunRestore returns as
+// errors rather than as an Outcome.
+func restoreSummary(o RestoreOutcome, onStart bool) (line string, exitCode int) {
 	line = fmt.Sprintf("restored %d sessions, %d windows (%d relocated, %d skipped)", o.Sessions, o.Windows, o.Relocated, o.Skipped)
 	if o.Errors > 0 {
 		line += fmt.Sprintf(" (%d errors — see events.log)", o.Errors)
-		exitCode = 1
+		if !onStart {
+			exitCode = 1
+		}
 	}
 	return line, exitCode
 }
@@ -267,8 +296,12 @@ func init() {
 			fmt.Fprintln(stdout, "skipped: server not seed-only")
 			return 0
 		}
+		if o.Kind == "skipped-no-snapshot" {
+			fmt.Fprintln(stdout, "skipped: no snapshot to restore")
+			return 0
+		}
 
-		summary, code := restoreSummary(o)
+		summary, code := restoreSummary(o, *onStart)
 		fmt.Fprintln(stdout, summary)
 		return code
 	}})
