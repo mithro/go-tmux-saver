@@ -28,9 +28,11 @@ func listSnaps(dir string) []string {
 	return out
 }
 
-// Prune removes snapshot dirs outside the retention policy. Never removes the
-// `last` target. Returns the names removed.
-func Prune(dir string, keep, dailyDays, rejectedKeep int, now time.Time) ([]string, error) {
+// PruneCandidates computes the same retention policy Prune applies and
+// returns the snapshot (and rejected/) names that would be removed, without
+// removing anything — the read-only half of Prune, shared so `prune
+// --dry-run` can report exactly what a real prune would do.
+func PruneCandidates(dir string, keep, dailyDays, rejectedKeep int, now time.Time) []string {
 	lastTarget, _ := os.Readlink(filepath.Join(dir, "last"))
 	keepSet := map[string]bool{lastTarget: true}
 	snaps := listSnaps(dir)
@@ -49,23 +51,31 @@ func Prune(dir string, keep, dailyDays, rejectedKeep int, now time.Time) ([]stri
 			keepSet[n] = true
 		}
 	}
-	var removed []string
+	var candidates []string
 	for _, n := range snaps {
 		if !keepSet[n] {
-			if err := os.RemoveAll(filepath.Join(dir, n)); err != nil {
-				return removed, err
-			}
-			removed = append(removed, n)
+			candidates = append(candidates, n)
 		}
 	}
 	rej := listSnaps(filepath.Join(dir, "rejected"))
 	for i, n := range rej {
 		if i >= rejectedKeep {
-			if err := os.RemoveAll(filepath.Join(dir, "rejected", n)); err != nil {
-				return removed, err
-			}
-			removed = append(removed, "rejected/"+n)
+			candidates = append(candidates, "rejected/"+n)
 		}
+	}
+	return candidates
+}
+
+// Prune removes snapshot dirs outside the retention policy. Never removes the
+// `last` target. Returns the names removed.
+func Prune(dir string, keep, dailyDays, rejectedKeep int, now time.Time) ([]string, error) {
+	candidates := PruneCandidates(dir, keep, dailyDays, rejectedKeep, now)
+	var removed []string
+	for _, n := range candidates {
+		if err := os.RemoveAll(filepath.Join(dir, n)); err != nil {
+			return removed, err
+		}
+		removed = append(removed, n)
 	}
 	return removed, nil
 }
