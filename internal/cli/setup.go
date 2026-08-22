@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -159,7 +160,7 @@ func renderSetupFiles(cfgPath string, stderr io.Writer) (config.Config, []setup.
 
 func runSetupGenerate(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("setup generate", flag.ContinueOnError)
-	dir := fs.String("dir", defaultConfigHome(), "directory to render managed files into (Rel-relative), without touching systemd/tmux")
+	dir := fs.String("dir", "", "directory to render managed files into (Rel-relative), without touching systemd/tmux; omit to print them to stdout instead")
 	cfgPath := fs.String("config", config.Path(), "config file")
 	fs.SetOutput(stderr)
 	if err := fs.Parse(args); err != nil {
@@ -170,6 +171,21 @@ func runSetupGenerate(args []string, stdout, stderr io.Writer) int {
 	if code != 0 {
 		return code
 	}
+
+	// RULING R50: with no --dir, render to stdout rather than defaulting to
+	// the real ConfigHome. "Show me what you would install" must not be a
+	// command that installs; `setup install` is how you write to ConfigHome.
+	if *dir == "" {
+		for _, f := range files {
+			fmt.Fprintf(stdout, "=== %s ===\n", f.Rel)
+			stdout.Write(f.Content)
+			if len(f.Content) > 0 && f.Content[len(f.Content)-1] != '\n' {
+				fmt.Fprintln(stdout)
+			}
+		}
+		return 0
+	}
+
 	if err := setup.WriteFiles(*dir, files); err != nil {
 		fmt.Fprintln(stderr, "setup generate:", err)
 		return 1
@@ -201,8 +217,24 @@ func runSetupInstall(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// validateJSON is `setup validate --json`'s output shape (RULING R50):
+// {"ok":bool,"drifts":[{"path":…,"kind":…,"diff":…}]}. Declared here rather
+// than reusing setup.Drift directly so the wire format stays independent of
+// that struct's Go field names.
+type validateJSON struct {
+	OK     bool              `json:"ok"`
+	Drifts []validateDriftJS `json:"drifts"`
+}
+
+type validateDriftJS struct {
+	Path string `json:"path"`
+	Kind string `json:"kind"`
+	Diff string `json:"diff"`
+}
+
 func runSetupValidate(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("setup validate", flag.ContinueOnError)
+	asJSON := fs.Bool("json", false, "emit the drift report as JSON instead of text")
 	cfgPath := fs.String("config", config.Path(), "config file")
 	fs.SetOutput(stderr)
 	if err := fs.Parse(args); err != nil {
@@ -213,8 +245,32 @@ func runSetupValidate(args []string, stdout, stderr io.Writer) int {
 	if code != 0 {
 		return code
 	}
-	env := realSetupEnv(cfg, stdout)
+	// Validate's own progress/diff output must never end up interleaved
+	// with the JSON document on stdout.
+	envOut := stdout
+	if *asJSON {
+		envOut = io.Discard
+	}
+	env := realSetupEnv(cfg, envOut)
 	drifts := setup.Validate(env, files)
+
+	if *asJSON {
+		rep := validateJSON{OK: len(drifts) == 0, Drifts: []validateDriftJS{}}
+		for _, d := range drifts {
+			rep.Drifts = append(rep.Drifts, validateDriftJS{Path: d.Path, Kind: d.Kind, Diff: d.Diff})
+		}
+		b, err := json.Marshal(rep)
+		if err != nil {
+			fmt.Fprintln(stderr, "setup validate:", err)
+			return 1
+		}
+		fmt.Fprintln(stdout, string(b))
+		if len(drifts) == 0 {
+			return 0
+		}
+		return 1
+	}
+
 	if len(drifts) == 0 {
 		fmt.Fprintln(stdout, "ok: no drift")
 		return 0

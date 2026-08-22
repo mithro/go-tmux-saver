@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -223,5 +224,135 @@ func TestSetupGenerateCLIWritesFilesWithNoExecCalls(t *testing.T) {
 		if info.Mode().Perm() != r.mode {
 			t.Errorf("%s: mode = %04o, want %04o", r.rel, info.Mode().Perm(), r.mode)
 		}
+	}
+}
+
+// TestSetupGenerateNoDirWritesToStdout covers I4/RULING R50: `setup
+// generate` with no --dir used to default to the REAL ConfigHome and write
+// there — a "show me what you'd install" command that silently installed.
+// With no --dir it now renders to stdout with "=== <rel> ===" separators
+// and touches no files at all.
+func TestSetupGenerateNoDirWritesToStdout(t *testing.T) {
+	withFakeExecCommand(t, func(timeout time.Duration, name string, args ...string) ([]byte, error) {
+		return nil, fmt.Errorf("execCommand must not be called by `setup generate`: %s %v", name, args)
+	})
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	cfgPath := writeConfig(t, "{}")
+
+	var out, errb bytes.Buffer
+	code := Run([]string{"setup", "generate", "--config", cfgPath}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+
+	for _, rel := range []string{
+		gtssetup.RelService, gtssetup.RelTimer, gtssetup.RelWatchService, gtssetup.RelWatchTimer,
+		gtssetup.RelAlertService, gtssetup.RelTmuxDropin, gtssetup.RelTmuxConf, gtssetup.RelConfigJSON,
+	} {
+		if !strings.Contains(out.String(), "=== "+rel+" ===") {
+			t.Errorf("stdout missing the %q separator:\n%s", rel, out.String())
+		}
+	}
+	if !strings.Contains(out.String(), "ExecStartPost=-") {
+		t.Errorf("stdout should carry the rendered file CONTENT, not just names:\n%s", out.String())
+	}
+
+	entries, err := os.ReadDir(configHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("setup generate with no --dir wrote into ConfigHome: %v", entries)
+	}
+}
+
+// healthyFakeExec answers every systemctl/systemd-analyze/tmux call the
+// setup validate path makes as a freshly-installed, healthy system would.
+func healthyFakeExec(timeout time.Duration, name string, args ...string) ([]byte, error) {
+	joined := strings.Join(args, " ")
+	switch {
+	case name == "tmux":
+		return []byte("bind-key -T prefix M-s run-shell -b \"go-tmux-saver save\"\n" +
+			"bind-key -T prefix M-r run-shell \"go-tmux-saver restore --merge\"\n"), nil
+	case strings.Contains(joined, "is-enabled"):
+		return []byte("enabled\n"), nil
+	case strings.Contains(joined, "is-active"):
+		return []byte("active\n"), nil
+	case strings.Contains(joined, "show"):
+		return []byte("ExecStartPost={ path=/x ; argv[]=/x restore --on-start ; ignore_errors=yes }\n"), nil
+	default: // verify, daemon-reload, enable
+		return nil, nil
+	}
+}
+
+// TestSetupValidateJSON covers I9/RULING R50: `setup validate --json` emits
+// {"ok":bool,"drifts":[{"path":…,"kind":…,"diff":…}]} so the drift check is
+// machine-readable (an Ansible/monitoring consumer shouldn't have to scrape
+// the human text). Exit codes are unchanged: 0 clean, 1 with drift.
+func TestSetupValidateJSON(t *testing.T) {
+	type driftJSON struct {
+		Path string `json:"path"`
+		Kind string `json:"kind"`
+		Diff string `json:"diff"`
+	}
+	type report struct {
+		OK     bool        `json:"ok"`
+		Drifts []driftJSON `json:"drifts"`
+	}
+
+	// (1) Nothing installed at all: ok=false, one "missing" drift per file.
+	withFakeExecCommand(t, healthyFakeExec)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cfgPath := writeConfig(t, "{}")
+
+	var out, errb bytes.Buffer
+	code := Run([]string{"setup", "validate", "--json", "--config", cfgPath}, &out, &errb)
+	if code != 1 {
+		t.Fatalf("exit %d, want 1 (drift present); stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	var rep report
+	if err := json.Unmarshal(out.Bytes(), &rep); err != nil {
+		t.Fatalf("json.Unmarshal(%q): %v", out.String(), err)
+	}
+	if rep.OK {
+		t.Errorf("ok = true with drift present: %+v", rep)
+	}
+	if len(rep.Drifts) == 0 {
+		t.Fatalf("drifts empty, want one per missing managed file: %s", out.String())
+	}
+	found := false
+	for _, d := range rep.Drifts {
+		if d.Path == gtssetup.RelService && d.Kind == "missing" {
+			found = true
+		}
+		if d.Path == "" || d.Kind == "" {
+			t.Errorf("drift with an empty path/kind: %+v", d)
+		}
+	}
+	if !found {
+		t.Errorf("no missing drift for %s: %+v", gtssetup.RelService, rep.Drifts)
+	}
+
+	// (2) Everything installed and healthy: ok=true, empty drifts, exit 0.
+	configHome := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", configHome)
+	out.Reset()
+	errb.Reset()
+	if code := Run([]string{"setup", "generate", "--dir", configHome, "--config", cfgPath}, &out, &errb); code != 0 {
+		t.Fatalf("setup generate exit %d: %s", code, errb.String())
+	}
+	out.Reset()
+	errb.Reset()
+	code = Run([]string{"setup", "validate", "--json", "--config", cfgPath}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0 (no drift); stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	rep = report{}
+	if err := json.Unmarshal(out.Bytes(), &rep); err != nil {
+		t.Fatalf("json.Unmarshal(%q): %v", out.String(), err)
+	}
+	if !rep.OK || len(rep.Drifts) != 0 {
+		t.Fatalf("report = %+v, want ok:true with no drifts", rep)
 	}
 }

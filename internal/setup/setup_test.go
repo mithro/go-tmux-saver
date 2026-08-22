@@ -700,3 +700,75 @@ func TestValidateDropinToleratesIgnoreErrorsPrefix(t *testing.T) {
 		}
 	}
 }
+
+// TestWriteFilesNeverOverwritesExistingConfigJSON covers I4/RULING R50:
+// config.json is user-editable, and Update already refused to rewrite it.
+// Install/WriteFiles had no such protection, so re-running `setup install`
+// (or `setup generate --dir` over a live config home) silently reset the
+// user's config to the defaults. Every other managed file is still
+// rewritten.
+func TestWriteFilesNeverOverwritesExistingConfigJSON(t *testing.T) {
+	dir := t.TempDir()
+	files := renderTestFiles(t)
+
+	custom := []byte(`{"socket":"custom-socket","interval_minutes":42}` + "\n")
+	if err := os.MkdirAll(filepath.Join(dir, "go-tmux-saver"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, RelConfigJSON), custom, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A managed unit file with stale content, to prove only config.json is
+	// protected.
+	if err := os.MkdirAll(filepath.Join(dir, "systemd", "user"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, RelService), []byte("stale\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := WriteFiles(dir, files); err != nil {
+		t.Fatalf("WriteFiles: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dir, RelConfigJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, custom) {
+		t.Fatalf("WriteFiles rewrote %s:\ngot  %s\nwant %s", RelConfigJSON, got, custom)
+	}
+	svc, err := os.ReadFile(filepath.Join(dir, RelService))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(svc, []byte("stale\n")) {
+		t.Fatalf("%s was not rewritten; only config.json is protected", RelService)
+	}
+}
+
+// TestInstallNeverOverwritesExistingConfigJSON is the same protection seen
+// through Install (which is what `setup install` and Update both call).
+func TestInstallNeverOverwritesExistingConfigJSON(t *testing.T) {
+	home := t.TempDir()
+	files := renderTestFiles(t)
+	env := testEnv(home, &fakeSystemctl{})
+
+	if err := Install(env, files); err != nil {
+		t.Fatalf("first Install: %v", err)
+	}
+	custom := []byte(`{"socket":"custom-socket"}` + "\n")
+	if err := os.WriteFile(filepath.Join(home, RelConfigJSON), custom, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Install(env, files); err != nil {
+		t.Fatalf("second Install: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(home, RelConfigJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, custom) {
+		t.Fatalf("Install rewrote %s:\ngot  %s\nwant %s", RelConfigJSON, got, custom)
+	}
+}

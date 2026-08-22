@@ -17,12 +17,23 @@ var timerUnits = []string{"go-tmux-saver.timer", "go-tmux-saver-watch.timer"}
 // go-tmux-saver/ directory — which holds the 0600 config.json — is created
 // 0700; systemd/user/ and the tmux-server.service.d/ drop-in directory stay
 // 0755). It performs no systemd/tmux side effects — Install uses it and
-// then does those; the `setup generate` CLI subcommand uses it directly to
-// materialize files into an arbitrary --dir without touching the user's
-// real systemd state.
+// then does those; the `setup generate --dir` CLI subcommand uses it
+// directly to materialize files into an arbitrary directory without
+// touching the user's real systemd state.
+//
+// RULING R50: an EXISTING config.json is never overwritten — the same
+// protection Update has always had, applied one level down so Install and
+// `setup generate --dir` over a live config home inherit it too. config.json
+// is user-editable and generated only as a starting point; re-running
+// `setup install` used to silently reset it to the defaults.
 func WriteFiles(dir string, files []Managed) error {
 	for _, f := range files {
 		full := filepath.Join(dir, f.Rel)
+		if f.Rel == RelConfigJSON {
+			if _, err := os.Stat(full); err == nil {
+				continue
+			}
+		}
 		if err := ensureManagedDir(filepath.Dir(full), dirModeFor(f.Rel)); err != nil {
 			return fmt.Errorf("setup: mkdir for %s: %w", f.Rel, err)
 		}
@@ -139,7 +150,11 @@ func Update(env Env, files []Managed, dryRun bool) (changed []string, err error)
 
 		if f.Rel == RelConfigJSON {
 			if _, statErr := os.Stat(full); statErr == nil {
-				continue // never overwrite an existing config.json
+				// Never overwrite an existing config.json. WriteFiles
+				// enforces this too (RULING R50); this check additionally
+				// keeps config.json out of the reported "changed" list and
+				// out of the dry-run diff.
+				continue
 			}
 		}
 
