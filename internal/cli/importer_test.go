@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -147,5 +148,76 @@ func TestImportResurrectCLIMissingSavefile(t *testing.T) {
 	st := &snapshot.Store{Dir: dataDir, Codec: gz}
 	if _, _, err := st.Last(); !os.IsNotExist(err) {
 		t.Fatalf("Store.Last() after missing-savefile error: err = %v, want ErrNotExist", err)
+	}
+}
+
+// malformedResurrectFixture writes a one-warning save file (one well-formed
+// pane/window/state record plus one wholly unrecognized line) to a temp
+// file and returns its path — shared by the RULING R37 tests below.
+func malformedResurrectFixture(t *testing.T) string {
+	t.Helper()
+	content := strings.Join([]string{
+		"pane\tops\t0\t1\t:*\t0\tt\t:/x\t1\tssh\t:ssh h",
+		"this is not a resurrect line at all",
+		"window\tops\t0\t:w\t1\t:*\tlay,1\toff",
+		"state\tops\tops",
+	}, "\n") + "\n"
+	path := filepath.Join(t.TempDir(), "malformed.txt")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestImportResurrectCLIWarningsSuffixAndStderr covers RULING R37's
+// best-effort default: a savefile with one skipped line still exits 0, the
+// skipped line is reported on stderr, and the stdout summary gains a
+// " (1 lines skipped)" suffix.
+func TestImportResurrectCLIWarningsSuffixAndStderr(t *testing.T) {
+	dataDir := t.TempDir()
+	cfgPath := writeConfig(t, "{}")
+	fixture := malformedResurrectFixture(t)
+
+	var out, errb bytes.Buffer
+	code := Run([]string{"import-resurrect", fixture, "--config", cfgPath, "--data-dir", dataDir}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	want := "imported 1 sessions, 1 windows, 1 panes (0 with contents) (1 lines skipped)"
+	if !strings.Contains(out.String(), want) {
+		t.Fatalf("stdout = %q, want it to contain %q", out.String(), want)
+	}
+	if !strings.Contains(errb.String(), "warning:") || !strings.Contains(errb.String(), "line 2:") {
+		t.Fatalf("stderr = %q, want a warning mentioning line 2", errb.String())
+	}
+}
+
+// TestImportResurrectCLIStrictExitsNonzero covers RULING R37's --strict:
+// the same skipped-line savefile now exits 1 (the summary and warnings are
+// still printed, and the snapshot is still staged/promoted — --strict only
+// changes the exit code).
+func TestImportResurrectCLIStrictExitsNonzero(t *testing.T) {
+	dataDir := t.TempDir()
+	cfgPath := writeConfig(t, "{}")
+	fixture := malformedResurrectFixture(t)
+
+	var out, errb bytes.Buffer
+	code := Run([]string{"import-resurrect", fixture, "--strict", "--config", cfgPath, "--data-dir", dataDir}, &out, &errb)
+	if code != 1 {
+		t.Fatalf("exit %d, want 1; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	want := "(1 lines skipped)"
+	if !strings.Contains(out.String(), want) {
+		t.Fatalf("stdout = %q, want it to contain %q", out.String(), want)
+	}
+	if !strings.Contains(errb.String(), "warning:") {
+		t.Fatalf("stderr = %q, want a warning", errb.String())
+	}
+
+	// --strict doesn't stop staging/promotion — the import still happened.
+	gz, _ := snapshot.LookupCodec("gzip")
+	st := &snapshot.Store{Dir: dataDir, Codec: gz}
+	if _, _, err := st.Last(); err != nil {
+		t.Fatalf("Store.Last() after --strict exit: %v, want the snapshot still promoted", err)
 	}
 }

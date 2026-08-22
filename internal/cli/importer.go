@@ -14,15 +14,23 @@ import (
 // RunImportResurrect converts the tmux-resurrect save at savePath (and,
 // optionally, its sibling pane_contents.tar.gz at contentsTar) into a
 // go-tmux-saver snapshot, stages it into store, and — unless promote is
-// false — promotes it so it becomes `last`. It prints a one-line summary
-// (sessions/windows/panes, and how many panes recovered scrollback) to w
-// either way, so a --promote=false dry run still reports what would have
-// landed.
-func RunImportResurrect(w io.Writer, store *snapshot.Store, savePath, contentsTar, claudeResumePath string, promote bool) int {
-	snap, contents, err := importer.FromResurrect(savePath, contentsTar, claudeResumePath)
+// false — promotes it so it becomes `last`. Every warning FromResurrect
+// returns (one per skipped/malformed save-file line or unmatched tar entry,
+// see internal/importer's package doc) is printed to stderr; the one-line
+// summary on stdout (sessions/windows/panes, how many panes recovered
+// scrollback) gains a " (S lines skipped)" suffix when S>0. This is a
+// best-effort import — a nonzero S alone doesn't fail the command (exit 0)
+// unless strict is set, in which case it exits 1 (the summary and
+// staging/promotion still happen either way, so --strict is purely a
+// stronger signal for scripting, not a dry run).
+func RunImportResurrect(stdout, stderr io.Writer, store *snapshot.Store, savePath, contentsTar, claudeResumePath string, promote, strict bool) int {
+	snap, contents, warnings, err := importer.FromResurrect(savePath, contentsTar, claudeResumePath)
 	if err != nil {
-		fmt.Fprintln(w, "import error:", err)
+		fmt.Fprintln(stderr, "import error:", err)
 		return 1
+	}
+	for _, msg := range warnings {
+		fmt.Fprintln(stderr, "warning:", msg)
 	}
 
 	panes, windows := snap.CountPanes()
@@ -39,20 +47,28 @@ func RunImportResurrect(w io.Writer, store *snapshot.Store, savePath, contentsTa
 
 	stg, err := store.Stage(snap, contents)
 	if err != nil {
-		fmt.Fprintln(w, "import error:", err)
+		fmt.Fprintln(stderr, "import error:", err)
 		return 1
 	}
 	if promote {
 		if _, err := stg.Promote(); err != nil {
-			fmt.Fprintln(w, "import error:", err)
+			fmt.Fprintln(stderr, "import error:", err)
 			return 1
 		}
 	} else if err := stg.Discard(); err != nil {
-		fmt.Fprintln(w, "import error:", err)
+		fmt.Fprintln(stderr, "import error:", err)
 		return 1
 	}
 
-	fmt.Fprintf(w, "imported %d sessions, %d windows, %d panes (%d with contents)\n", len(snap.Sessions), windows, panes, withContents)
+	summary := fmt.Sprintf("imported %d sessions, %d windows, %d panes (%d with contents)", len(snap.Sessions), windows, panes, withContents)
+	if len(warnings) > 0 {
+		summary += fmt.Sprintf(" (%d lines skipped)", len(warnings))
+	}
+	fmt.Fprintln(stdout, summary)
+
+	if strict && len(warnings) > 0 {
+		return 1
+	}
 	return 0
 }
 
@@ -63,6 +79,7 @@ func init() {
 		fs := flag.NewFlagSet("import-resurrect", flag.ContinueOnError)
 		contents := fs.String("contents", "", "path to tmux-resurrect's sibling pane_contents.tar.gz (omit for no pane contents)")
 		promote := fs.Bool("promote", true, "promote the imported snapshot to `last` (--promote=false stages then discards, printing counts only)")
+		strict := fs.Bool("strict", false, "exit 1 if any save-file lines or tar entries were skipped (summary/warnings are still printed either way)")
 		socket := fs.String("socket", "", "override config socket")
 		dataDir := fs.String("data-dir", "", "override config data dir")
 		cfgPath := fs.String("config", config.Path(), "config file")
@@ -103,6 +120,6 @@ func init() {
 			return code
 		}
 
-		return RunImportResurrect(stdout, store, savePath, *contents, expandHome(cfg.ClaudeResumePath), *promote)
+		return RunImportResurrect(stdout, stderr, store, savePath, *contents, expandHome(cfg.ClaudeResumePath), *promote, *strict)
 	}})
 }

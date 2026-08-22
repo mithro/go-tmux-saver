@@ -1,6 +1,8 @@
 package importer
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -16,9 +18,12 @@ const claudeResumePath = "~/bin/claude-resume"
 // client-session mapping, and pane contents landing under the right
 // snapshot.PaneKey from the sibling tarball.
 func TestFromResurrectFixture(t *testing.T) {
-	snap, contents, err := FromResurrect("testdata/tmux_resurrect_sample.txt", "testdata/pane_contents.tar.gz", claudeResumePath)
+	snap, contents, warnings, err := FromResurrect("testdata/tmux_resurrect_sample.txt", "testdata/pane_contents.tar.gz", claudeResumePath)
 	if err != nil {
 		t.Fatalf("FromResurrect: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none (fixture is well-formed)", warnings)
 	}
 
 	if snap.Schema != snapshot.SchemaVersion {
@@ -156,15 +161,109 @@ func TestFromResurrectFixture(t *testing.T) {
 // pane_contents.tar.gz to import from) — it must succeed with an empty
 // contents map, not error.
 func TestFromResurrectNoContents(t *testing.T) {
-	snap, contents, err := FromResurrect("testdata/tmux_resurrect_sample.txt", "", claudeResumePath)
+	snap, contents, warnings, err := FromResurrect("testdata/tmux_resurrect_sample.txt", "", claudeResumePath)
 	if err != nil {
 		t.Fatalf("FromResurrect: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
 	}
 	if len(contents) != 0 {
 		t.Fatalf("contents = %v, want empty", contents)
 	}
 	if len(snap.Sessions) != 2 {
 		t.Fatalf("sessions = %d, want 2", len(snap.Sessions))
+	}
+}
+
+// TestFromResurrectMalformedLinesWarn covers RULING R37: a save file with
+// one well-formed pane line, one 10-field (truncated) pane line, and one
+// wholly unrecognized line must import the good pane while producing
+// exactly one warning per bad line, each mentioning its 1-based line
+// number.
+func TestFromResurrectMalformedLinesWarn(t *testing.T) {
+	content := strings.Join([]string{
+		"pane\tops\t0\t1\t:*\t0\tt\t:/x\t1\tssh\t:ssh h",
+		"this is not a resurrect line at all",
+		"pane\tops\t1\t0\t:\t0\tt2\t:/y\t1\tbash",
+		"window\tops\t0\t:w\t1\t:*\tlay,1\toff",
+		"state\tops\tops",
+	}, "\n") + "\n"
+	path := filepath.Join(t.TempDir(), "malformed.txt")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, _, warnings, err := FromResurrect(path, "", claudeResumePath)
+	if err != nil {
+		t.Fatalf("FromResurrect: %v", err)
+	}
+	if len(warnings) != 2 {
+		t.Fatalf("warnings = %v, want exactly 2", warnings)
+	}
+	if !strings.Contains(warnings[0], "line 2:") {
+		t.Fatalf("warnings[0] = %q, want it to mention line 2", warnings[0])
+	}
+	if !strings.Contains(warnings[1], "line 3:") {
+		t.Fatalf("warnings[1] = %q, want it to mention line 3", warnings[1])
+	}
+
+	// The one well-formed pane (line 1, in window ops:0) still imported.
+	if len(snap.Sessions) != 1 || snap.Sessions[0].Name != "ops" {
+		t.Fatalf("sessions = %+v, want just [ops]", snap.Sessions)
+	}
+	panes, _ := snap.CountPanes()
+	if panes != 1 {
+		t.Fatalf("panes = %d, want 1 (only the well-formed pane line)", panes)
+	}
+}
+
+// TestFromResurrectTabsInTitleAndWindowName covers RULING R38: pane_title
+// and window_name can contain embedded tab characters (tmux allows
+// arbitrary bytes there) — the right-to-left field parsing must still
+// recover the correct dir/command for the pane and the correct name for
+// the window, rather than misaligning every field after the tab.
+func TestFromResurrectTabsInTitleAndWindowName(t *testing.T) {
+	content := strings.Join([]string{
+		"pane\twork\t0\t1\t:*\t0\thas\ttab\t:/home/tim\t1\tbash\t:",
+		"window\twork\t0\t:win\tname\t1\t:*\tlay,1\ton",
+		"state\twork\twork",
+	}, "\n") + "\n"
+	path := filepath.Join(t.TempDir(), "tabs.txt")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, _, warnings, err := FromResurrect(path, "", claudeResumePath)
+	if err != nil {
+		t.Fatalf("FromResurrect: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
+	}
+	if len(snap.Sessions) != 1 {
+		t.Fatalf("sessions = %+v, want 1", snap.Sessions)
+	}
+	work := snap.Sessions[0]
+	if len(work.Windows) != 1 {
+		t.Fatalf("windows = %+v, want 1", work.Windows)
+	}
+	win := work.Windows[0]
+	if win.Name != "win\tname" {
+		t.Fatalf("window name = %q, want %q", win.Name, "win\tname")
+	}
+	if len(win.Panes) != 1 {
+		t.Fatalf("panes = %+v, want 1", win.Panes)
+	}
+	p := win.Panes[0]
+	if p.Title != "has\ttab" {
+		t.Fatalf("pane title = %q, want %q", p.Title, "has\ttab")
+	}
+	if p.Cwd != "/home/tim" {
+		t.Fatalf("pane cwd = %q, want /home/tim", p.Cwd)
+	}
+	if p.Restore.Kind != "shell" {
+		t.Fatalf("pane restore kind = %q, want shell", p.Restore.Kind)
 	}
 }
 
