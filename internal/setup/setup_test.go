@@ -522,7 +522,8 @@ func TestValidateKeybindingMissingDrift(t *testing.T) {
 // Key-binding validation must accept the bindings exactly as tmux
 // `list-keys` prints them once installed — M-s backgrounded with
 // `run-shell -b`, M-r foreground, both with the absolute binary path — and
-// must still reject the ways they can genuinely be wrong.
+// must reject every way they can genuinely be wrong, including a server
+// still holding the pre-R42 foreground M-s (RULING R43).
 func TestValidateKeyBindingsAcceptsListKeysShapes(t *testing.T) {
 	const installed = "" +
 		"bind-key -T prefix M-s run-shell -b \"/usr/bin/go-tmux-saver save\"\n" +
@@ -533,34 +534,65 @@ func TestValidateKeyBindingsAcceptsListKeysShapes(t *testing.T) {
 		out       string
 		err       error
 		wantDrift bool
+		wantDiff  string // substring the Diff must carry when drifting
 	}{
-		{"installed (M-s backgrounded, M-r foreground)", installed, nil, false},
+		{name: "installed (M-s backgrounded, M-r foreground)", out: installed},
 		{
-			"legacy foreground M-s still accepted",
-			"bind-key -T prefix M-s run-shell \"/usr/bin/go-tmux-saver save\"\n" +
-				"bind-key -T prefix M-r run-shell \"/usr/bin/go-tmux-saver restore --merge\"\n",
-			nil, false,
-		},
-		{
-			"extra unrelated bindings and padding",
-			"bind-key -T prefix c new-window\n" +
+			name: "extra unrelated bindings, padding and other key tables",
+			out: "bind-key -T prefix c new-window\n" +
+				"bind-key    -T copy-mode  M-r   send-keys -X middle-line\n" +
 				"bind-key    -T prefix     M-s   run-shell -b \"go-tmux-saver save\"\n" +
-				"bind-key    -T prefix     M-r   run-shell \"go-tmux-saver restore --merge\"\n",
-			nil, false,
+				"bind-key    -T prefix     M-r   run-shell \"go-tmux-saver restore --merge\"   \n",
 		},
-		{"M-r missing", "bind-key -T prefix M-s run-shell -b \"/usr/bin/go-tmux-saver save\"\n", nil, true},
-		{"M-s missing", "bind-key -T prefix M-r run-shell \"/usr/bin/go-tmux-saver restore --merge\"\n", nil, true},
-		{"nothing bound", "bind-key -T prefix c new-window\n", nil, true},
+		{
+			// The whole point of R42: a server still running the old
+			// foreground binding is stale, and the validator must say so
+			// rather than pass or report a bare "missing".
+			name: "legacy foreground M-s is drift",
+			out: "bind-key -T prefix M-s run-shell \"/usr/bin/go-tmux-saver save\"\n" +
+				"bind-key -T prefix M-r run-shell \"/usr/bin/go-tmux-saver restore --merge\"\n",
+			wantDrift: true,
+			wantDiff:  "not to the background form (run-shell -b)",
+		},
+		{
+			// Anchoring: a longer command must not satisfy a shorter one.
+			name: "M-r bound to a longer look-alike command",
+			out: "bind-key -T prefix M-s run-shell -b \"/usr/bin/go-tmux-saver save\"\n" +
+				"bind-key -T prefix M-r run-shell \"/usr/bin/go-tmux-saver restore --merge-foo\"\n",
+			wantDrift: true,
+			wantDiff:  `M-r is not bound to run-shell "<binary> restore --merge"`,
+		},
+		{
+			name: "M-s bound to a longer look-alike command",
+			out: "bind-key -T prefix M-s run-shell -b \"/usr/bin/go-tmux-saver save-buffer\"\n" +
+				"bind-key -T prefix M-r run-shell \"/usr/bin/go-tmux-saver restore --merge\"\n",
+			wantDrift: true,
+			wantDiff:  `M-s is not bound to run-shell -b "<binary> save"`,
+		},
+		{
+			name:      "M-r missing",
+			out:       "bind-key -T prefix M-s run-shell -b \"/usr/bin/go-tmux-saver save\"\n",
+			wantDrift: true,
+			wantDiff:  "M-r is not bound",
+		},
+		{
+			name:      "M-s missing",
+			out:       "bind-key -T prefix M-r run-shell \"/usr/bin/go-tmux-saver restore --merge\"\n",
+			wantDrift: true,
+			wantDiff:  "M-s is not bound",
+		},
+		{name: "nothing bound", out: "bind-key -T prefix c new-window\n", wantDrift: true, wantDiff: "M-s is not bound"},
 		{
 			// The key and the command must be on the SAME line: M-s bound to
 			// something else, with the save hung off another key, is drift.
-			"key and command on different lines",
-			"bind-key -T prefix M-s display-message \"nope\"\n" +
+			name: "key and command on different lines",
+			out: "bind-key -T prefix M-s display-message \"nope\"\n" +
 				"bind-key -T prefix M-x run-shell -b \"/usr/bin/go-tmux-saver save\"\n" +
 				"bind-key -T prefix M-r run-shell \"/usr/bin/go-tmux-saver restore --merge\"\n",
-			nil, true,
+			wantDrift: true,
+			wantDiff:  "M-s is not bound",
 		},
-		{"tmux unavailable", installed, errors.New("no server running"), true},
+		{name: "tmux unavailable", out: installed, err: errors.New("no server running"), wantDrift: true, wantDiff: "no server running"},
 	}
 
 	for _, tc := range tests {
@@ -570,8 +602,14 @@ func TestValidateKeyBindingsAcceptsListKeysShapes(t *testing.T) {
 			if got != tc.wantDrift {
 				t.Fatalf("validateKeyBindings() drift = %v (%+v), want %v", got, drift, tc.wantDrift)
 			}
-			if got && (drift.Kind != "keybinding-missing" || drift.Path != RelTmuxConf) {
+			if !got {
+				return
+			}
+			if drift.Kind != "keybinding-missing" || drift.Path != RelTmuxConf {
 				t.Fatalf("drift = %+v, want {Path: %s, Kind: keybinding-missing}", drift, RelTmuxConf)
+			}
+			if !strings.Contains(drift.Diff, tc.wantDiff) {
+				t.Errorf("drift.Diff = %q, want it to contain %q", drift.Diff, tc.wantDiff)
 			}
 		})
 	}

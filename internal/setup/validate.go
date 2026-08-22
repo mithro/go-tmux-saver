@@ -142,37 +142,63 @@ func validateDropinEffective(env Env) (Drift, bool) {
 }
 
 // validateKeyBindings checks the live tmux key table (as `list-keys` prints
-// it, e.g. `bind-key -T prefix M-s run-shell -b "…/go-tmux-saver save"`)
-// still binds M-s to a save and M-r to a merge-restore.
+// it) still binds M-s and M-r to the *rendered* forms:
 //
-// The match is per line and on the key plus the command, deliberately not on
-// the whole run-shell form: M-s runs the save with `run-shell -b` (background,
-// so a multi-second save never blocks the tmux server) while M-r stays
-// foreground, and neither the -b nor the binary's path should make a
-// correctly-bound key look like drift. Requiring both halves on one line
-// stops an M-s bound to something else plus a save bound to another key from
-// passing as a pair.
+//	bind-key -T prefix M-s run-shell -b "<binary> save"
+//	bind-key -T prefix M-r run-shell "<binary> restore --merge"
+//
+// The match is strict about the run-shell form, not just the command. M-s
+// must be the background (`run-shell -b`) form: a foreground M-s blocks the
+// whole tmux server for the several seconds a save takes, which is exactly
+// the staleness a validator exists to catch — a server still holding the
+// pre-R42 foreground binding must report drift, not pass. M-r must stay
+// foreground and is checked only for its command.
+//
+// Both halves must appear on one line, so an M-s bound to something else
+// plus a save hung off another key cannot pass as a pair, and the command
+// match is anchored (end-of-line or the closing quote must follow) so
+// `restore --merge-foo` does not satisfy `restore --merge`.
 func validateKeyBindings(env Env) (Drift, bool) {
 	out, err := env.TmuxBindings()
-	ok := err == nil &&
-		bindsKeyTo(out, "M-s", "go-tmux-saver save") &&
-		bindsKeyTo(out, "M-r", "go-tmux-saver restore --merge")
-	if ok {
+
+	var problems []string
+	if err != nil {
+		problems = append(problems, err.Error())
+	}
+	switch {
+	case bindsKeyTo(out, "M-s", "go-tmux-saver save", true):
+		// correctly bound to the background form
+	case bindsKeyTo(out, "M-s", "go-tmux-saver save", false):
+		problems = append(problems, `M-s is bound to a save but not to the background form (run-shell -b), so a save blocks the tmux server: re-run 'go-tmux-saver setup update' and reload the managed tmux.conf`)
+	default:
+		problems = append(problems, `M-s is not bound to run-shell -b "<binary> save"`)
+	}
+	if !bindsKeyTo(out, "M-r", "go-tmux-saver restore --merge", false) {
+		problems = append(problems, `M-r is not bound to run-shell "<binary> restore --merge"`)
+	}
+	if len(problems) == 0 {
 		return Drift{}, false
 	}
-	diff := strings.TrimSpace(out)
-	if err != nil {
-		diff = strings.TrimSpace(diff + " " + err.Error())
+
+	diff := strings.Join(problems, "; ")
+	if listed := strings.TrimSpace(out); listed != "" {
+		diff += "\n" + listed
 	}
 	return Drift{Path: RelTmuxConf, Kind: "keybinding-missing", Diff: diff}, true
 }
 
-// bindsKeyTo reports whether any single line of tmux `list-keys` output
-// mentions both key and cmd. key is matched as a whitespace-delimited field
-// so "M-s" does not match a longer key name that merely contains it.
-func bindsKeyTo(listKeys, key, cmd string) bool {
+// bindsKeyTo reports whether any single line of tmux `list-keys` output binds
+// key to cmd. key is matched as a whitespace-delimited field so "M-s" does
+// not match a longer key name that merely contains it; cmd is matched
+// anchored at its right-hand end (see hasAnchoredCommand); and when
+// background is true the line must also use `run-shell -b`.
+func bindsKeyTo(listKeys, key, cmd string, background bool) bool {
 	for _, line := range strings.Split(listKeys, "\n") {
-		if !strings.Contains(line, cmd) {
+		line = strings.TrimRight(line, " \t\r")
+		if background && !strings.Contains(line, "run-shell -b") {
+			continue
+		}
+		if !hasAnchoredCommand(line, cmd) {
 			continue
 		}
 		for _, f := range strings.Fields(line) {
@@ -180,6 +206,25 @@ func bindsKeyTo(listKeys, key, cmd string) bool {
 				return true
 			}
 		}
+	}
+	return false
+}
+
+// hasAnchoredCommand reports whether line contains cmd immediately followed
+// by end-of-line or a closing double quote — the two ways tmux's list-keys
+// output ends a run-shell argument. Anchoring stops a longer command
+// (`restore --merge-foo`, `save-buffer`) from satisfying a shorter one.
+func hasAnchoredCommand(line, cmd string) bool {
+	for off := 0; off <= len(line)-len(cmd); {
+		i := strings.Index(line[off:], cmd)
+		if i < 0 {
+			return false
+		}
+		end := off + i + len(cmd)
+		if end == len(line) || line[end] == '"' {
+			return true
+		}
+		off += i + 1
 	}
 	return false
 }

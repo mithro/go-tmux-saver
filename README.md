@@ -26,6 +26,11 @@ Every subcommand accepts `--config <path>` (default: the XDG config path),
 plus `--socket`/`--data-dir` overrides where applicable. Run
 `go-tmux-saver <command> -h` for the full flag list.
 
+Set `GTS_TRACE=1` to print per-phase timings (dial, `/proc` scan, each
+collection command, the `capture-pane` loop, staging) to stderr — a save's
+wall time is dominated by tmux's own `capture-pane` cost, and this shows the
+split. Off by default; normal output is unchanged.
+
 - **`save`** — snapshot the running tmux server.
   ```sh
   go-tmux-saver save --auto --no-display

@@ -199,9 +199,16 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 		if err != nil {
 			return nil, nil, fmt.Errorf("malformed list-panes line (history_size): %q", l)
 		}
-		rs := time.Now()
+		// The clock reads are behind trace.Enabled so the untraced path
+		// really is one bool test per pane, not two time.Now() syscalls.
+		var rs time.Time
+		if trace.Enabled {
+			rs = time.Now()
+		}
 		restore := procs.Resolve(c.Procs, c.Reg, pid, c.Allowlist)
-		resolveTotal += time.Since(rs)
+		if trace.Enabled {
+			resolveTotal += time.Since(rs)
+		}
 		p := snapshot.Pane{
 			Index:        idx,
 			ID:           paneID,
@@ -221,7 +228,10 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 	var capTotal, capMax time.Duration
 	capBytes, capLines := 0, 0
 	for _, cp := range caps {
-		cs := time.Now()
+		var cs time.Time
+		if trace.Enabled {
+			cs = time.Now()
+		}
 		lines, err := c.T.Run(ctx, fmt.Sprintf("capture-pane -epJ -S -%d -t %s", cp.hist, cp.id))
 		if err != nil {
 			return nil, nil, fmt.Errorf("capture %s: %w", cp.id, err)
