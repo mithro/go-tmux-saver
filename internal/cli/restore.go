@@ -43,7 +43,12 @@ type RestoreDeps struct {
 	OnStart     bool
 	SnapshotDir string // non-empty overrides Store.Last()
 	NoContents  bool
-	ReplayDir   string // <dataDir>/replay/<run-id>; created+owned by the caller
+	// PrepareReplayDir is called at most once, and only once RunRestore has
+	// decided a restore will actually happen (i.e. AFTER the --on-start
+	// seed-only check passes) — so an --on-start run that turns out to be a
+	// skip never touches the replay directory at all. Its result is passed
+	// to restore.Apply as the cat-replay directory.
+	PrepareReplayDir func() (string, error)
 }
 
 // RestoreOutcome describes what one RunRestore call did.
@@ -69,6 +74,14 @@ func RunRestore(ctx context.Context, d RestoreDeps) (RestoreOutcome, error) {
 
 	if d.OnStart && !restore.IsSeedOnly(live, d.Cfg.SeedSession, d.Cfg.SeedWindow) {
 		return RestoreOutcome{Kind: "skipped-not-seed-only", Duration: time.Since(start)}, nil
+	}
+
+	// A restore will actually happen from here on — only now is it safe to
+	// wipe/create the replay directory (minor: never touch it on an
+	// --on-start skip).
+	replayDir, err := d.PrepareReplayDir()
+	if err != nil {
+		return RestoreOutcome{}, fmt.Errorf("replay dir: %w", err)
 	}
 
 	var snap *snapshot.Snapshot
@@ -123,7 +136,7 @@ func RunRestore(ctx context.Context, d RestoreDeps) (RestoreOutcome, error) {
 	}
 	plan := restore.BuildPlan(live, snap, opts)
 
-	report, err := restore.Apply(ctx, d.T, plan, contentsFn, d.ReplayDir)
+	report, err := restore.Apply(ctx, d.T, plan, contentsFn, replayDir)
 	if err != nil {
 		return RestoreOutcome{Notes: report.Notes}, err
 	}
@@ -146,12 +159,35 @@ func RunRestore(ctx context.Context, d RestoreDeps) (RestoreOutcome, error) {
 	return o, nil
 }
 
+// restoreSummary formats the one-line summary RunRestore's caller prints
+// after a completed (possibly partially-failed) restore, and the process
+// exit code that goes with it: any failed planned creation (o.Errors > 0)
+// appends an "(N errors — see events.log)" suffix and calls for exit 1;
+// otherwise exit 0. Split out from the "restore" subcommand's closure so
+// this formatting/exit-code decision has its own direct unit test.
+func restoreSummary(o RestoreOutcome) (line string, exitCode int) {
+	line = fmt.Sprintf("restored %d sessions, %d windows (%d relocated, %d skipped)", o.Sessions, o.Windows, o.Relocated, o.Skipped)
+	if o.Errors > 0 {
+		line += fmt.Sprintf(" (%d errors — see events.log)", o.Errors)
+		exitCode = 1
+	}
+	return line, exitCode
+}
+
 // prepareReplayDir removes any stale <dataDir>/replay/* directories left
 // over from a previous restore, then creates a fresh
-// <dataDir>/replay/<run-id>/ (run-id = UTC timestamp + this process's pid,
-// so concurrent restores never collide) for Apply's cat-replay files
-// (RULING R26). The files are intentionally left in place after restore —
-// cat runs asynchronously in the pane — and get swept on the NEXT restore.
+// <dataDir>/replay/<run-id>/ (run-id = UTC timestamp + this process's pid)
+// for Apply's cat-replay files (RULING R26). The files are intentionally
+// left in place after restore — cat runs asynchronously in the pane — and
+// get swept on the NEXT restore.
+//
+// The wipe-then-create is NOT concurrency-safe: two "restore" processes
+// racing against the same data dir could each glob the other's freshly
+// created run-id directory and remove it out from under an in-flight cat.
+// go-tmux-saver doesn't run concurrent restores against one data dir today
+// (it's driven serially, e.g. by a systemd timer or --on-start at session
+// start), so this is an accepted, documented limitation rather than a fix
+// pending a real lock.
 func prepareReplayDir(dataDir string) (string, error) {
 	base := filepath.Join(dataDir, "replay")
 	old, err := filepath.Glob(filepath.Join(base, "*"))
@@ -210,37 +246,30 @@ func init() {
 		}
 		defer tr.Close()
 
-		replayDir, err := prepareReplayDir(store.Dir)
-		if err != nil {
-			fmt.Fprintln(stderr, "restore:", err)
-			return 1
-		}
-
 		o, err := RunRestore(ctx, RestoreDeps{
 			T: tr, Store: store, Cfg: cfg,
 			OnStart: *onStart, SnapshotDir: *snapshotDir, NoContents: *noContents,
-			ReplayDir: replayDir,
+			PrepareReplayDir: func() (string, error) { return prepareReplayDir(store.Dir) },
 		})
+		// Print whatever Notes RunRestore accumulated BEFORE reporting an
+		// error — RunRestore can return a partial Notes list alongside a
+		// non-nil err (e.g. restore.Apply failing outright on ctx
+		// cancellation after some actions already ran), and those notes are
+		// diagnostic context for the error, not something to withhold.
+		for _, n := range o.Notes {
+			fmt.Fprintln(stderr, "note:", n)
+		}
 		if err != nil {
 			fmt.Fprintln(stderr, "restore:", err)
 			return 1
-		}
-		for _, n := range o.Notes {
-			fmt.Fprintln(stderr, "note:", n)
 		}
 		if o.Kind == "skipped-not-seed-only" {
 			fmt.Fprintln(stdout, "skipped: server not seed-only")
 			return 0
 		}
 
-		summary := fmt.Sprintf("restored %d sessions, %d windows (%d relocated, %d skipped)", o.Sessions, o.Windows, o.Relocated, o.Skipped)
-		if o.Errors > 0 {
-			summary += fmt.Sprintf(" (%d errors — see events.log)", o.Errors)
-		}
+		summary, code := restoreSummary(o)
 		fmt.Fprintln(stdout, summary)
-		if o.Errors > 0 {
-			return 1
-		}
-		return 0
+		return code
 	}})
 }

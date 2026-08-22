@@ -65,7 +65,7 @@ func TestApplyRelocationAndContentsReplay(t *testing.T) {
 	}
 
 	wantFile := filepath.Join(replayDir, netPaneKey+".txt")
-	wantCmd := fmt.Sprintf("send-keys -t net:0.0 %q Enter", " cat "+shellQuote([]string{wantFile}))
+	wantCmd := fmt.Sprintf("send-keys -t net:0.0 %s Enter", tmuxQuote(" cat "+shellQuote([]string{wantFile})))
 	if !strings.Contains(calls, wantCmd) {
 		t.Errorf("expected cat-replay send-keys %q, got:\n%s", wantCmd, calls)
 	}
@@ -196,6 +196,58 @@ func TestApplyPlainNewWindowFailureAbortsBlock(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected a Notes entry for the failed new-window, got %+v", report.Notes)
+	}
+}
+
+// TestApplyNewSessionFailureAbortsWholeSession covers the session-wide half
+// of the abort policy (FINDING 2/RULING R28): a failed new-session must
+// abort EVERY remaining action of that whole saved session — not just its
+// first window — since every later new-window in that session targets a
+// session that was never created. A following, unrelated session's creation
+// must still run normally.
+func TestApplyNewSessionFailureAbortsWholeSession(t *testing.T) {
+	snap := &snapshot.Snapshot{Sessions: []snapshot.Session{
+		{Name: "net", ActiveWindow: 0, Windows: []snapshot.Window{
+			{Index: 0, Name: "swcfg", Layout: "L1", Panes: []snapshot.Pane{{Index: 0, Cwd: "/tmp", Restore: snapshot.Restore{Kind: "shell"}}}},
+			{Index: 1, Name: "logs", Layout: "L2", Panes: []snapshot.Pane{{Index: 0, Cwd: "/tmp", Restore: snapshot.Restore{Kind: "shell"}}}},
+		}},
+		{Name: "other", ActiveWindow: 0, Windows: []snapshot.Window{
+			{Index: 0, Name: "w", Layout: "L3", Panes: []snapshot.Pane{{Index: 0, Cwd: "/tmp", Restore: snapshot.Restore{Kind: "shell"}}}},
+		}},
+	}}
+	live := LiveState{Sessions: map[string][]LiveWindow{"default": {{0, "h"}}}} // neither "net" nor "other" exist live
+	p := BuildPlan(live, snap, Options{SeedSession: "default", SeedWindow: "h"})
+
+	failCmd := "new-session -d -s net -n swcfg -c /tmp"
+	f := &failOnce{Fake: &tmuxctl.Fake{Default: []string{}}, failCmd: failCmd}
+
+	report, err := Apply(context.Background(), f, p, func(string) ([]byte, bool) { return nil, false }, t.TempDir())
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+
+	for _, c := range f.Fake.Calls {
+		if strings.Contains(c, "net:") {
+			t.Errorf("no action should ever target net: after its new-session failed, got call %q", c)
+		}
+	}
+	calls := strings.Join(f.Fake.Calls, "\n")
+	if !strings.Contains(calls, "new-session -d -s other -n w -c /tmp") {
+		t.Errorf("the following unrelated session's creation should still run:\n%s", calls)
+	}
+
+	if report.Created != 1 { // only "other" succeeded; "net" (both windows) must be excluded
+		t.Errorf("Created = %d, want 1 (net's windows must not be counted)", report.Created)
+	}
+
+	found := false
+	for _, n := range report.Notes {
+		if strings.Contains(n, failCmd) && strings.Contains(n, "boom") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a Notes entry describing the failed new-session, got %+v", report.Notes)
 	}
 }
 

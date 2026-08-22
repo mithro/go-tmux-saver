@@ -216,6 +216,9 @@ func (s *Store) Load(dir string) (*Snapshot, error) {
 // method re-parses dir's layout.json on every call just to learn the codec
 // name — for that case, ContentReader parses it once up front instead.
 func (s *Store) ReadContent(dir string, p Pane) ([]byte, error) {
+	if p.ContentFile == "" {
+		return nil, os.ErrNotExist
+	}
 	snap, err := s.Load(dir)
 	if err != nil {
 		return nil, err

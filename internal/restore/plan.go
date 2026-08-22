@@ -80,6 +80,45 @@ func shellQuote(argv []string) string {
 	return strings.Join(parts, " ")
 }
 
+// tmuxQuote wraps s as ONE tmux double-quoted command-line argument.
+//
+// RULING R30: tmux's own double-quote syntax is NOT Go's %q, and NOT a
+// POSIX shell's either — verified against this tmux (next-3.8) directly via
+// control mode: inside "…", tmux EXPANDS "$NAME" (an argument written as
+// "'echo' '$HOME'" is typed into the pane as "'echo' '/home/tim'" — tmux
+// resolved $HOME itself before send-keys ever ran), and Go-style "\xNN"
+// escapes are mangled (an argument written as "esc\x1bhere" is typed as
+// "escx1bhere" — tmux doesn't understand \x and just drops the backslash).
+// "\"", "\\", "\$", ";", "#{…}", and a raw literal tab all pass through
+// tmux's double-quote parsing untouched.
+//
+// So only backslash, the closing quote, and the dollar sign need escaping
+// for tmux itself. A literal newline or carriage return in the argument
+// would otherwise end the command line before reaching tmux's own escape
+// handling, so those are also escaped, as "\n"/"\r" text (not the control
+// bytes) — tmux does understand those in a double-quoted string. Every
+// other byte, including a raw ESC, passes through unescaped.
+func tmuxQuote(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + 2)
+	b.WriteByte('"')
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; c {
+		case '\\', '"', '$':
+			b.WriteByte('\\')
+			b.WriteByte(c)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		default:
+			b.WriteByte(c)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
 // cwdOrHome returns cwd if it still names an existing directory, else the
 // user's home directory — used for split-window panes whose saved cwd may
 // no longer exist.
@@ -201,19 +240,20 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 				case "argv":
 					if len(pn.Restore.Argv) > 0 { // empty argv: treated like "shell", no send-keys
 						// shellQuote's result must reach tmux as ONE key
-						// argument (%q), not spliced in as bare, space-separated
+						// argument, not spliced in as bare, space-separated
 						// tokens on the tmux command line: tmux's send-keys types
 						// each of its own arguments back-to-back with NO space
 						// inserted between them, so unquoted multi-token argv
 						// (e.g. 'tail' '-f' '/dev/null') would be typed into the
-						// pane as "tail-f/dev/null". Sending it as one quoted
-						// argument makes tmux type the whole shell-quoted string
-						// literally, spaces included, for the pane's own shell to
-						// re-parse on Enter — exactly as shellQuote intends.
-						plan.tmux(sess.Name, fmt.Sprintf("send-keys -t %s %q Enter", paneTarget, shellQuote(pn.Restore.Argv)), "")
+						// pane as "tail-f/dev/null". tmuxQuote (RULING R30, not
+						// Go's %q — tmux's own double-quote syntax expands $NAME
+						// and mangles \xNN) wraps it as one literal argument,
+						// spaces included, for the pane's own shell to re-parse
+						// on Enter — exactly as shellQuote intends.
+						plan.tmux(sess.Name, fmt.Sprintf("send-keys -t %s %s Enter", paneTarget, tmuxQuote(shellQuote(pn.Restore.Argv))), "")
 					}
 				case "claude":
-					plan.tmux(sess.Name, fmt.Sprintf("send-keys -t %s %q Enter", paneTarget, shellQuote([]string{o.ClaudeResumePath, pn.Restore.ClaudeSession})), "")
+					plan.tmux(sess.Name, fmt.Sprintf("send-keys -t %s %s Enter", paneTarget, tmuxQuote(shellQuote([]string{o.ClaudeResumePath, pn.Restore.ClaudeSession}))), "")
 				}
 			}
 			plan.tmux(sess.Name, fmt.Sprintf("select-pane -t %s.%d", target, activePane), "")

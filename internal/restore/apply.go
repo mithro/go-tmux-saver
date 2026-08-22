@@ -143,7 +143,7 @@ func Apply(ctx context.Context, t tmuxctl.Transport, p Plan, contents func(paneK
 				continue
 			}
 			keys := " cat " + shellQuote([]string{path})
-			cmd := fmt.Sprintf("send-keys -t %s %q Enter", target, keys)
+			cmd := fmt.Sprintf("send-keys -t %s %s Enter", target, tmuxQuote(keys))
 			if _, err := t.Run(ctx, cmd); err != nil {
 				report.Notes = append(report.Notes, fmt.Sprintf("%s: %v", cmd, err))
 			}

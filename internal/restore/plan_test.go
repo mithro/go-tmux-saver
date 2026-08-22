@@ -167,6 +167,48 @@ func TestPlanEmptyArgvNoSendKeys(t *testing.T) {
 	}
 }
 
+// TestPlanArgvDollarSignEscapedForTmux covers RULING R30: tmux's own
+// double-quote syntax expands "$NAME" (verified directly against this
+// tmux via control mode), so an unescaped "$HOME" spliced into a
+// send-keys command line would be resolved by TMUX ITSELF before the pane
+// ever sees it — not what a saved "echo $HOME" argv means. The emitted
+// command must contain the tmux-escaped "\$HOME", and must not contain any
+// UNESCAPED occurrence of "$HOME" (i.e. one without a preceding backslash).
+func TestPlanArgvDollarSignEscapedForTmux(t *testing.T) {
+	snap := &snapshot.Snapshot{Sessions: []snapshot.Session{
+		{Name: "extra", ActiveWindow: 0, Windows: []snapshot.Window{
+			{Index: 0, Name: "w", Layout: "L0", Panes: []snapshot.Pane{
+				{Index: 0, Cwd: "/tmp", Restore: snapshot.Restore{Kind: "argv", Argv: []string{"echo", "$HOME"}}},
+			}},
+		}},
+	}}
+	live := LiveState{Sessions: map[string][]LiveWindow{"default": {{0, "h"}}}} // "extra" doesn't exist live: created fresh
+	p := BuildPlan(live, snap, Options{SeedSession: "default", SeedWindow: "h"})
+	cmds := strings.Join(flatten(p), "\n")
+
+	if !strings.Contains(cmds, `\$HOME`) {
+		t.Fatalf("expected tmux-escaped \\$HOME in the plan, got:\n%s", cmds)
+	}
+	if strings.Contains(strings.ReplaceAll(cmds, `\$HOME`, ""), "$HOME") {
+		t.Fatalf("found an UNESCAPED $HOME (tmux would expand it itself) in:\n%s", cmds)
+	}
+}
+
+// TestTmuxQuote covers RULING R30's escaping rules directly: backslash,
+// double-quote, and dollar sign are escaped (dollar because tmux's own
+// double-quote parsing expands "$NAME" — verified against this tmux via
+// control mode); a literal newline is escaped as "\n" text; and a raw ESC
+// byte (0x1B) passes through completely untouched (Go's %q would have
+// mangled it, per the same verification — tmux doesn't understand \xNN).
+func TestTmuxQuote(t *testing.T) {
+	in := "a\\b\"c$d\ne" + "\x1b" + "f"
+	got := tmuxQuote(in)
+	want := `"a\\b\"c\$d\ne` + "\x1b" + `f"`
+	if got != want {
+		t.Fatalf("tmuxQuote(%q) = %q, want %q", in, got, want)
+	}
+}
+
 func flatten(p Plan) []string {
 	var out []string
 	for _, a := range p.Actions {
