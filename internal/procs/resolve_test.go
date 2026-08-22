@@ -21,6 +21,14 @@ func TestResolve(t *testing.T) {
 	if r.Kind != "shell" {
 		t.Fatalf("shell: %+v", r)
 	}
+	r = Resolve(tb, reg, 500, DefaultAllowlist) // ssh (root, no shell) → ssh argv
+	if r.Kind != "argv" || len(r.Argv) != 2 || r.Argv[0] != "ssh" {
+		t.Fatalf("ssh root argv: %+v", r)
+	}
+	r = Resolve(tb, reg, 501, DefaultAllowlist) // foo-claude-resume (bad boundary) → shell
+	if r.Kind != "shell" {
+		t.Fatalf("bad boundary: %+v", r)
+	}
 	if r := Resolve(tb, reg, 4242, DefaultAllowlist); r.Kind != "shell" {
 		t.Fatalf("unknown pid: %+v", r)
 	}

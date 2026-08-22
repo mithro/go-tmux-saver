@@ -9,7 +9,7 @@ import (
 
 var DefaultAllowlist = []string{"ssh", "mosh-client", "claude", "claude-resume", "vi", "vim", "nvim", "emacs", "man", "less", "more", "tail", "top", "htop"}
 
-var resumeRe = regexp.MustCompile(`(?:claude-resume|--resume)\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`)
+var resumeRe = regexp.MustCompile(`(?:^|[\s/])(?:claude-resume|--resume)\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`)
 
 var shells = map[string]bool{"bash": true, "zsh": true, "sh": true, "fish": true, "dash": true}
 
@@ -36,7 +36,7 @@ func Resolve(t *Table, reg ClaudeRegistry, panePID int, allowlist []string) snap
 	for _, a := range allowlist {
 		allowed[a] = true
 	}
-	for _, pid := range pids[1:] { // skip the pane's own shell
+	for _, pid := range pids {
 		p, _ := t.Get(pid)
 		if shells[p.Comm] {
 			continue
