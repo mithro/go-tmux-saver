@@ -72,6 +72,72 @@ func TestPlanRelocatesOnConflict(t *testing.T) {
 	}
 }
 
+// TestPlanSelectWindowNotDeferredAcrossRelocations covers RULING R23: with
+// two saved windows in one existing session both relocated (their saved
+// indices are occupied live by differently-named windows), the
+// select-window for the session's ActiveWindow must be emitted right after
+// that window's own actions — before the second relocation's new-window
+// action — not deferred to the end of the session's loop. WinPlaceholder is
+// a single fixed token ("{{WIN}}"), so a deferred select-window would be
+// ambiguous about which relocation it refers to once a second relocation
+// has happened.
+func TestPlanSelectWindowNotDeferredAcrossRelocations(t *testing.T) {
+	snap := &snapshot.Snapshot{Sessions: []snapshot.Session{
+		{Name: "default", ActiveWindow: 1, Windows: []snapshot.Window{
+			{Index: 1, Name: "win1", Layout: "L1", Panes: []snapshot.Pane{{Index: 0, Cwd: "/tmp", Restore: snapshot.Restore{Kind: "shell"}}}},
+			{Index: 2, Name: "win2", Layout: "L2", Panes: []snapshot.Pane{{Index: 0, Cwd: "/tmp", Restore: snapshot.Restore{Kind: "shell"}}}},
+		}},
+	}}
+	live := LiveState{Sessions: map[string][]LiveWindow{"default": {{1, "other1"}, {2, "other2"}}}}
+	p := BuildPlan(live, snap, Options{})
+
+	selectIdx, secondRelocIdx, relocCount, selectCount := -1, -1, 0, 0
+	for i, a := range p.Actions {
+		if a.Kind != "tmux" {
+			continue
+		}
+		cmd := a.Args[0]
+		if strings.HasPrefix(cmd, `new-window -d -P -F "#{window_index}"`) {
+			relocCount++
+			if relocCount == 2 {
+				secondRelocIdx = i
+			}
+		}
+		if cmd == "select-window -t default:{{WIN}}" {
+			selectCount++
+			if selectIdx == -1 {
+				selectIdx = i
+			}
+		}
+	}
+	if relocCount != 2 {
+		t.Fatalf("expected 2 relocations, got %d\n%v", relocCount, flatten(p))
+	}
+	if selectCount != 1 {
+		t.Fatalf("expected exactly one select-window, got %d\n%v", selectCount, flatten(p))
+	}
+	if selectIdx == -1 || secondRelocIdx == -1 || selectIdx >= secondRelocIdx {
+		t.Fatalf("select-window (idx %d) must appear before the second relocation's new-window (idx %d)\n%v", selectIdx, secondRelocIdx, flatten(p))
+	}
+}
+
+// TestPlanEmptyArgvNoSendKeys covers RULING R24: an "argv" pane with no
+// saved argv is treated like "shell" — no send-keys is emitted for it.
+func TestPlanEmptyArgvNoSendKeys(t *testing.T) {
+	snap := &snapshot.Snapshot{Sessions: []snapshot.Session{
+		{Name: "default", ActiveWindow: 0, Windows: []snapshot.Window{
+			{Index: 1, Name: "empty", Layout: "L1", Panes: []snapshot.Pane{{Index: 0, Cwd: "/tmp", Restore: snapshot.Restore{Kind: "argv", Argv: nil}}}},
+		}},
+	}}
+	live := LiveState{Sessions: map[string][]LiveWindow{"default": {{0, "h"}}}}
+	p := BuildPlan(live, snap, Options{})
+	for _, cmd := range flatten(p) {
+		if strings.HasPrefix(cmd, "send-keys") {
+			t.Errorf("unexpected send-keys for empty argv: %q", cmd)
+		}
+	}
+}
+
 func flatten(p Plan) []string {
 	var out []string
 	for _, a := range p.Actions {

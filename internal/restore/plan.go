@@ -104,6 +104,16 @@ func firstCwd(panes []snapshot.Pane) string {
 //     relocated — new-window lets tmux pick the next free index, and every
 //     subsequent action for that window addresses it via the WinPlaceholder
 //     target, which Apply resolves at run time.
+//
+// select-window (when the session was created, or this window was
+// created/relocated and it is sess.ActiveWindow) is emitted immediately at
+// the end of that window's own iteration, never deferred to the end of the
+// session's loop: WinPlaceholder is a single fixed token, so if a session
+// relocates more than one window, a deferred select-window referencing
+// "{{WIN}}" would end up resolved against whichever relocation happened to
+// run last, not the one it was meant for. Emitting it inline keeps every
+// use of a given relocation's "{{WIN}}" contiguous in the action list, so
+// Apply's sequential placeholder substitution is unambiguous.
 func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 	var plan Plan
 
@@ -114,9 +124,6 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 			liveByIdx[lw.Index] = lw.Name
 		}
 		sessionCreated := !sessExists
-
-		var activeTarget string
-		haveActiveTarget := false
 
 		for i, win := range sess.Windows {
 			var target string
@@ -166,7 +173,9 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 				}
 				switch pn.Restore.Kind {
 				case "argv":
-					plan.tmux(fmt.Sprintf("send-keys -t %s %s Enter", paneTarget, shellQuote(pn.Restore.Argv)), "")
+					if len(pn.Restore.Argv) > 0 { // empty argv: treated like "shell", no send-keys
+						plan.tmux(fmt.Sprintf("send-keys -t %s %s Enter", paneTarget, shellQuote(pn.Restore.Argv)), "")
+					}
 				case "claude":
 					plan.tmux(fmt.Sprintf("send-keys -t %s %s Enter", paneTarget, shellQuote([]string{o.ClaudeResumePath, pn.Restore.ClaudeSession})), "")
 				}
@@ -182,13 +191,8 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 				plan.Created++
 			}
 			if created && win.Index == sess.ActiveWindow {
-				activeTarget = target
-				haveActiveTarget = true
+				plan.tmux(fmt.Sprintf("select-window -t %s", target), "")
 			}
-		}
-
-		if haveActiveTarget {
-			plan.tmux(fmt.Sprintf("select-window -t %s", activeTarget), "")
 		}
 	}
 
