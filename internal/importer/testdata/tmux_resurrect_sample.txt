@@ -1,0 +1,9 @@
+grouped_session	work-mirror	work	:0	:0
+pane	ops	0	1	:*	0	tim@host: ~/proj	:/home/tim/proj	1	ssh	:ssh host.example
+pane	work	0	1	:*	0	tim@host: ~	:/home/tim	0	bash	:
+pane	work	0	1	:*	1	tim@host: ~/local	:/home/tim/local	1	claude	:/home/tim/bin/claude-resume aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee
+pane	work	1	0	:	0	tim@host: ~/logs	:/home/tim/logs	1	tail	:
+window	ops	0	:ssh	1	:*	abcd,80x24,0,0,0	off
+window	work	0	:editor	1	:*	efab,80x24,0,0,1	on
+window	work	1	:logs	0	:	cdef,80x24,0,0,2	:
+state	work	ops
