@@ -29,13 +29,39 @@ var Sendmail = func(body []byte) error {
 	return nil
 }
 
+// sanitizeHeader makes s safe for use as (the whole of) a single RFC-822
+// header field body: CR and LF are replaced with a single space, so a value
+// coming from an untrusted source (e.g. --unit) can't inject additional
+// header lines (a bare "\r\n" would otherwise terminate the header and let
+// attacker-controlled text add e.g. a "Bcc:" line) or terminate the header
+// block early.
+func sanitizeHeader(s string) string {
+	s = strings.ReplaceAll(s, "\r\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	return s
+}
+
+// Subject builds the standard go-tmux-saver alert subject line:
+// "[go-tmux-saver] <host>: <unit> failed" or "... recovered" when recovered
+// is true. Shared by the alert subcommand and save --auto's recovery hook so
+// both produce an identical format.
+func Subject(host, unit string, recovered bool) string {
+	verb := "failed"
+	if recovered {
+		verb = "recovered"
+	}
+	return fmt.Sprintf("[go-tmux-saver] %s: %s %s", host, unit, verb)
+}
+
 // Send builds an RFC-822 message (To:, Subject:, and a
 // "Content-Type: text/plain; charset=utf-8" header, a blank line, then body)
-// and hands the resulting bytes to sendmail.
+// and hands the resulting bytes to sendmail. to and subject are sanitized
+// against header injection (embedded CR/LF) before being written.
 func Send(sendmail func(body []byte) error, to, subject, body string) error {
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "To: %s\n", to)
-	fmt.Fprintf(&buf, "Subject: %s\n", subject)
+	fmt.Fprintf(&buf, "To: %s\n", sanitizeHeader(to))
+	fmt.Fprintf(&buf, "Subject: %s\n", sanitizeHeader(subject))
 	fmt.Fprintf(&buf, "Content-Type: text/plain; charset=utf-8\n")
 	fmt.Fprintf(&buf, "\n")
 	buf.WriteString(body)
@@ -67,17 +93,33 @@ func (r RateLimiter) markerPath(key string) string {
 // ShouldSend reports whether an alert for key should be sent right now: true
 // on the first failure of a streak (it creates the marker), false while the
 // marker from an earlier ShouldSend call is still present.
+//
+// The marker is created with O_CREATE|O_EXCL so two concurrent callers for
+// the same key (e.g. overlapping OnFailure= invocations) can't both observe
+// "no marker" and both decide to send: exactly one O_EXCL create wins, the
+// other gets EEXIST and returns false.
 func (r RateLimiter) ShouldSend(key string, now time.Time) bool {
 	p := r.markerPath(key)
-	if _, err := os.Stat(p); err == nil {
-		return false
-	}
 	if err := os.MkdirAll(r.Dir, 0o700); err != nil {
 		// Can't persist rate-limit state; fail open so the alert still goes
 		// out rather than silently vanishing.
 		return true
 	}
-	_ = os.WriteFile(p, []byte(now.UTC().Format(time.RFC3339)+"\n"), 0o600)
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		if os.IsExist(err) {
+			// Marker already armed — either by an earlier ShouldSend in this
+			// streak or a concurrent racer that won the create; either way,
+			// this call must not send.
+			return false
+		}
+		// Some other failure (e.g. permission denied): can't persist
+		// rate-limit state, so fail open rather than silently dropping the
+		// alert.
+		return true
+	}
+	defer f.Close()
+	_, _ = f.WriteString(now.UTC().Format(time.RFC3339) + "\n")
 	return true
 }
 

@@ -158,7 +158,10 @@ func init() {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-		host, _ := os.Hostname()
+		host, err := os.Hostname()
+		if err != nil {
+			host = "unknown-host"
+		}
 		home, _ := os.UserHomeDir()
 
 		d := SaveDeps{
@@ -184,7 +187,7 @@ func init() {
 		if *auto && (o.Kind == "kept" || o.Kind == "unchanged") {
 			rl := mail.RateLimiter{Dir: store.Dir}
 			if rl.Clear(alertUnit) {
-				subject := fmt.Sprintf("[go-tmux-saver] %s: %s recovered", host, alertUnit)
+				subject := mail.Subject(host, alertUnit, true)
 				body := "save succeeded: " + summary
 				// A sendmail failure here must not change the save's own
 				// exit code — the save already succeeded; log and move on.

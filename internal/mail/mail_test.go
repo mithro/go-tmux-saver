@@ -3,6 +3,8 @@ package mail
 import (
 	"errors"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -71,6 +73,110 @@ func TestRateLimiterClearThenShouldSendAgain(t *testing.T) {
 	}
 	if !rl.ShouldSend("go-tmux-saver.service", now.Add(time.Hour)) {
 		t.Fatal("ShouldSend after Clear = false, want true (new streak)")
+	}
+}
+
+// TestRateLimiterShouldSendConcurrentExactlyOneWinner pins the atomic-create
+// fix (controller ruling R34, finding 1): N goroutines racing ShouldSend for
+// the same key must see exactly one true, proving the marker create is a
+// single atomic O_CREATE|O_EXCL rather than a stat-then-write race where
+// multiple concurrent OnFailure= invocations could all observe "no marker"
+// and all decide to send.
+func TestRateLimiterShouldSendConcurrentExactlyOneWinner(t *testing.T) {
+	rl := RateLimiter{Dir: t.TempDir()}
+	const n = 20
+	var wg sync.WaitGroup
+	results := make([]bool, n)
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			results[i] = rl.ShouldSend("go-tmux-saver.service", time.Now())
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	trueCount := 0
+	for _, r := range results {
+		if r {
+			trueCount++
+		}
+	}
+	if trueCount != 1 {
+		t.Fatalf("true count across %d concurrent ShouldSend calls = %d, want exactly 1", n, trueCount)
+	}
+}
+
+// headerLines returns the header block of msg (everything before the first
+// blank line) as individual lines, for asserting no extra header line (e.g.
+// an injected "Bcc:") was created.
+func headerLines(msg string) []string {
+	head, _, _ := strings.Cut(msg, "\n\n")
+	return strings.Split(head, "\n")
+}
+
+func TestSendSanitizesHeaderInjection(t *testing.T) {
+	c := &capture{}
+	evilSubject := "unit x\r\nBcc: evil@example.com"
+	if err := Send(c.send, "tim@example.com", evilSubject, "the body"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	msg := string(c.body)
+
+	subjectLines := 0
+	bccLines := 0
+	for _, line := range headerLines(msg) {
+		if strings.HasPrefix(line, "Subject:") {
+			subjectLines++
+		}
+		if strings.HasPrefix(line, "Bcc:") {
+			bccLines++
+		}
+	}
+	if subjectLines != 1 {
+		t.Fatalf("message =\n%q\nwant exactly one Subject: line, got %d", msg, subjectLines)
+	}
+	if bccLines != 0 {
+		t.Fatalf("message =\n%q\nwant no Bcc: header line (CR/LF injection not sanitized)", msg)
+	}
+	if strings.Contains(msg, "\r") {
+		t.Fatalf("message =\n%q\nwant no raw CR left over from the injected subject", msg)
+	}
+	// Exactly one blank line still separates headers from the body, and the
+	// injected text is neutered into the Subject value rather than becoming
+	// its own header line.
+	want := "To: tim@example.com\n" +
+		"Subject: unit x Bcc: evil@example.com\n" +
+		"Content-Type: text/plain; charset=utf-8\n" +
+		"\n" +
+		"the body"
+	if msg != want {
+		t.Fatalf("message =\n%q\nwant\n%q", msg, want)
+	}
+}
+
+func TestSendSanitizesToHeaderInjection(t *testing.T) {
+	c := &capture{}
+	if err := Send(c.send, "tim@example.com\r\nBcc: evil@example.com", "subject", "body"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	msg := string(c.body)
+	for _, line := range headerLines(msg) {
+		if strings.HasPrefix(line, "Bcc:") {
+			t.Fatalf("message =\n%q\nwant no Bcc: header line injected via To:", msg)
+		}
+	}
+}
+
+func TestSubjectFormat(t *testing.T) {
+	if got, want := Subject("host", "go-tmux-saver.service", false), "[go-tmux-saver] host: go-tmux-saver.service failed"; got != want {
+		t.Fatalf("Subject(recovered=false) = %q, want %q", got, want)
+	}
+	if got, want := Subject("host", "go-tmux-saver.service", true), "[go-tmux-saver] host: go-tmux-saver.service recovered"; got != want {
+		t.Fatalf("Subject(recovered=true) = %q, want %q", got, want)
 	}
 }
 

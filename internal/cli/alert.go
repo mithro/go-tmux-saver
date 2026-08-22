@@ -61,11 +61,7 @@ func init() {
 		if err != nil {
 			host = "unknown-host"
 		}
-		verb := "failed"
-		if *recovered {
-			verb = "recovered"
-		}
-		subject := fmt.Sprintf("[go-tmux-saver] %s: %s %s", host, *unit, verb)
+		subject := mail.Subject(host, *unit, *recovered)
 		body := alertBody(store.Dir, cfg, 20)
 
 		if err := mail.Send(mail.Sendmail, cfg.MailTo, subject, body); err != nil {
