@@ -364,3 +364,54 @@ func TestRunSaveDoesNotDeleteALiveSaveStagingDir(t *testing.T) {
 		t.Fatalf("a save holding the lock should sweep stale staging dirs (stat err = %v)", err)
 	}
 }
+
+// TestDisplayCmdUsesTmuxQuoting pins the minor R30 consistency fix: the
+// in-tmux summary went out as Go's %q, which is not tmux's own
+// double-quote syntax — tmux expands "$NAME" inside "…" and mangles
+// Go-style \xNN escapes. A pane title or session name in the summary could
+// therefore be expanded by tmux before display.
+func TestDisplayCmdUsesTmuxQuoting(t *testing.T) {
+	got := displayCmd(`saved $HOME "x"`)
+	want := `display-message "go-tmux-saver: saved \$HOME \"x\""`
+	if got != want {
+		t.Fatalf("displayCmd = %q, want %q", got, want)
+	}
+}
+
+// TestRunSaveUnreadableLastIsHardError pins the minor: Store.Last() failing
+// for any reason OTHER than "no snapshot yet" (a corrupt layout.json, an
+// unreadable store) used to be swallowed — the degenerate-snapshot guard
+// silently compares against nothing and every save is accepted, exactly
+// when the store is in a state that most warrants suspicion. It is now a
+// hard error with an `error` event.
+func TestRunSaveUnreadableLastIsHardError(t *testing.T) {
+	d := deps(t, saveFake())
+	snapDir := filepath.Join(d.Store.Dir, "snap-20260822T120000Z")
+	if err := os.MkdirAll(snapDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(snapDir, "layout.json"), []byte("{ this is not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("snap-20260822T120000Z", filepath.Join(d.Store.Dir, "last")); err != nil {
+		t.Fatal(err)
+	}
+
+	o, err := RunSave(context.Background(), d)
+	if err == nil {
+		t.Fatalf("RunSave = %+v, nil error; want a hard error rather than a silently unguarded save", o)
+	}
+	if o.Kind != "error" {
+		t.Errorf("Kind = %q, want %q", o.Kind, "error")
+	}
+	if _, err := os.Lstat(filepath.Join(d.Store.Dir, "last")); err != nil {
+		t.Errorf("the corrupt snapshot must be left alone for a human to look at: %v", err)
+	}
+	ev, err := snapshot.TailEvents(d.Store.Dir, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ev) != 1 || ev[0].Outcome != "error" {
+		t.Fatalf("events %+v, want one error event", ev)
+	}
+}

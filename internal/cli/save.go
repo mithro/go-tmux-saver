@@ -94,6 +94,15 @@ func tryLockDataDir(dir string) (release func(), ok bool, err error) {
 	}, true, nil
 }
 
+// displayCmd renders the in-tmux summary as a display-message command.
+// The message is quoted with tmux's OWN double-quote rules (RULING R30),
+// not Go's %q: inside "…" tmux expands "$NAME" itself and mangles Go-style
+// \xNN escapes, so a summary echoing e.g. a path or pane title could be
+// rewritten by tmux before the user ever saw it.
+func displayCmd(msg string) string {
+	return "display-message " + tmuxctl.Quote("go-tmux-saver: "+msg)
+}
+
 // SaveDeps bundles everything RunSave needs so it can be driven by real tmux
 // state (the "save" subcommand below) or by a tmuxctl.Fake (tests).
 type SaveDeps struct {
@@ -195,6 +204,18 @@ func RunSave(ctx context.Context, d SaveDeps) (Outcome, error) {
 	stop = trace.Time("save.last")
 	last, _, lerr := d.Store.Last()
 	stop()
+	if lerr != nil && !errors.Is(lerr, os.ErrNotExist) {
+		// "No snapshot yet" (no `last` symlink) is the normal first-run
+		// state and simply means there is nothing to compare against. Any
+		// OTHER failure — a corrupt layout.json, an unreadable store —
+		// would silently disable BOTH the unchanged-dedup and the
+		// degenerate-snapshot guard, accepting whatever we just collected
+		// precisely when the store is in a state that most warrants
+		// suspicion. Fail loudly instead and leave the store untouched.
+		err := fmt.Errorf("read last snapshot: %w", lerr)
+		logEv("error", snap, "", err.Error())
+		return Outcome{Kind: "error"}, err
+	}
 	lastPanes := 0
 	if lerr == nil {
 		lastPanes, _ = last.CountPanes()
@@ -317,7 +338,7 @@ func init() {
 			Display: func(string) {},
 		}
 		if !*noDisplay {
-			d.Display = func(m string) { tr.Run(ctx, fmt.Sprintf("display-message %q", "go-tmux-saver: "+m)) }
+			d.Display = func(m string) { tr.Run(ctx, displayCmd(m)) }
 		}
 
 		o, err := RunSave(ctx, d)

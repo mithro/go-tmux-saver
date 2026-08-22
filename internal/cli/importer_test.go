@@ -221,3 +221,54 @@ func TestImportResurrectCLIStrictExitsNonzero(t *testing.T) {
 		t.Fatalf("Store.Last() after --strict exit: %v, want the snapshot still promoted", err)
 	}
 }
+
+// TestImportResurrectPromoteLogsEventAndTouchesFresh pins the minor:
+// rollout step 2 is "import your tmux-resurrect save", and `status`
+// immediately afterwards reported STALE with no events at all, because the
+// import promoted a snapshot without recording anything. A promoting import
+// now logs a `kept` event with detail "import-resurrect" and touches the
+// freshness marker; a --promote=false run (which discards its staging dir)
+// must do neither.
+func TestImportResurrectPromoteLogsEventAndTouchesFresh(t *testing.T) {
+	newStore := func() *snapshot.Store {
+		t.Helper()
+		gz, _ := snapshot.LookupCodec("gzip")
+		st := &snapshot.Store{Dir: t.TempDir(), Codec: gz}
+		if err := st.EnsureDir(); err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+
+	noPromote := newStore()
+	var out, errb bytes.Buffer
+	if code := RunImportResurrect(&out, &errb, noPromote, resurrectFixture, "", "/bin/claude-resume", false, false); code != 0 {
+		t.Fatalf("--promote=false exit %d: %s", code, errb.String())
+	}
+	if ev, _ := snapshot.TailEvents(noPromote.Dir, 10); len(ev) != 0 {
+		t.Errorf("a non-promoting import must log nothing, got %+v", ev)
+	}
+	if _, ok, _ := snapshot.LastGood(noPromote.Dir); ok {
+		t.Error("a non-promoting import must not touch the freshness marker")
+	}
+
+	promoted := newStore()
+	out.Reset()
+	errb.Reset()
+	if code := RunImportResurrect(&out, &errb, promoted, resurrectFixture, "", "/bin/claude-resume", true, false); code != 0 {
+		t.Fatalf("--promote exit %d: %s", code, errb.String())
+	}
+	ev, err := snapshot.TailEvents(promoted.Dir, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ev) != 1 || ev[0].Outcome != "kept" || ev[0].Detail != "import-resurrect" {
+		t.Fatalf("events %+v, want one kept/import-resurrect event", ev)
+	}
+	if ev[0].Panes != 4 || ev[0].Sessions != 2 {
+		t.Errorf("event counts %+v, want the imported snapshot's 4 panes / 2 sessions", ev[0])
+	}
+	if _, ok, _ := snapshot.LastGood(promoted.Dir); !ok {
+		t.Error("a promoting import must touch the freshness marker so status isn't instantly STALE")
+	}
+}

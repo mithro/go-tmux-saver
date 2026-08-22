@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/mithro/go-tmux-saver/internal/config"
 	"github.com/mithro/go-tmux-saver/internal/importer"
@@ -54,6 +55,20 @@ func RunImportResurrect(stdout, stderr io.Writer, store *snapshot.Store, savePat
 		if _, err := stg.Promote(); err != nil {
 			fmt.Fprintln(stderr, "import error:", err)
 			return 1
+		}
+		// A promoted import IS the store's current good snapshot, so record
+		// it like one: without this, `status` right after rollout step 2
+		// reported STALE with an empty event log even though a perfectly
+		// good snapshot had just been installed.
+		if err := snapshot.AppendEvent(store.Dir, snapshot.Event{
+			Time: time.Now(), Outcome: "kept",
+			Panes: panes, Windows: windows, Sessions: len(snap.Sessions),
+			Detail: "import-resurrect",
+		}); err != nil {
+			fmt.Fprintln(stderr, "warning: events.log:", err)
+		}
+		if err := snapshot.TouchFresh(store.Dir); err != nil {
+			fmt.Fprintln(stderr, "warning: fresh marker:", err)
 		}
 	} else if err := stg.Discard(); err != nil {
 		fmt.Fprintln(stderr, "import error:", err)
