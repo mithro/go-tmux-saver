@@ -203,15 +203,24 @@ windows appear.
 - Within an existing session, **existing windows are never renamed, moved or
   modified.**
 - A saved window whose index is free is created there; whose index is occupied
-  by a window of a *different* name is created at the next free index and
-  logged `relocated`; occupied by the *same* name is logged `skipped`.
+  by the *same* name is logged `skipped`; if a window with the saved *name*
+  already exists anywhere in the session (at another index — e.g. an earlier
+  relocation) it is also `skipped` (`present at index N`), which keeps re-runs
+  idempotent; otherwise (index occupied by a *different* name, name absent) it
+  is created at the next free index and logged `relocated`.
 - Panes: split to the saved count, then `select-layout <saved layout>`; each
   pane starts the default shell with `-c <cwd>`; the restore argv (or
   `~/bin/claude-resume <uuid>` for Claude panes) is typed via `send-keys` so a
   shell remains when it exits. Panes whose cwd no longer exists fall back to
   `$HOME` (logged).
-- Scrollback replay (`--contents`, default on, config-switchable) cats the pane's
-  contents file into the pane before the restore command.
+- Scrollback replay (`--contents`, default on, config-switchable): the decoded
+  scrollback is written to `<data dir>/replay/<run-id>/<pane key>.txt` (0600;
+  older replay dirs are removed at the start of each restore) and a single
+  ` cat '<path>'` command is typed into the fresh pane before its restore
+  command, so the saved text is *displayed*. Saved content is never pasted or
+  fed to the shell as keystrokes (`paste-buffer` would execute every line).
+- Restore commands are typed as ONE shell-quoted `send-keys` argument (tmux
+  concatenates multiple `send-keys` arguments with no separator).
 - The last attached client's session is selected; grouped clones are never
   restored (login machinery recreates them).
 - Idempotent: re-running completes a partial restore; the plan and every
