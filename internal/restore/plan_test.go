@@ -15,7 +15,7 @@ func snapNet() *snapshot.Snapshot {
 		}},
 		{Name: "net", ActiveWindow: 0, Windows: []snapshot.Window{
 			{Index: 0, Name: "swcfg", Layout: "L2", Panes: []snapshot.Pane{
-				{Index: 0, Cwd: "/", Active: true, Restore: snapshot.Restore{Kind: "argv", Argv: []string{"ssh", "sw it's"}}},
+				{Index: 0, Cwd: "/", Active: true, ContentFile: "net_0_0.txt.gz", Restore: snapshot.Restore{Kind: "argv", Argv: []string{"ssh", "sw it's"}}},
 				{Index: 1, Cwd: "/nonexistent/dir", Restore: snapshot.Restore{Kind: "shell"}}}}}},
 	}}
 }
