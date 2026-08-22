@@ -43,8 +43,8 @@ func TestPlanOnSeedServer(t *testing.T) {
 		"new-session -d -s net -n swcfg -c /",
 		"split-window -d -t net:0 -c /home/tim", // missing cwd → $HOME fallback (HOME=/home/tim in test via t.Setenv)
 		`select-layout -t net:0 "L2"`,
-		`send-keys -t net:0.0 'ssh' 'sw it'\''s' Enter`,
-		`send-keys -t default:1.0 '/home/tim/bin/claude-resume' 'abc' Enter`,
+		`send-keys -t net:0.0 "'ssh' 'sw it'\\''s'" Enter`,
+		`send-keys -t default:1.0 "'/home/tim/bin/claude-resume' 'abc'" Enter`,
 		"select-window -t net:0",
 		"select-window -t default:1",
 	} {
@@ -69,6 +69,35 @@ func TestPlanRelocatesOnConflict(t *testing.T) {
 	}
 	if !strings.Contains(cmds, `new-window -d -P -F "#{window_index}" -t default: -n rcfiles -c /tmp`) || p.Relocated != 1 {
 		t.Fatalf("expected relocation\n%s %+v", cmds, p)
+	}
+}
+
+// TestPlanSkipsRelocationWhenSameNameExistsElsewhere covers RULING R27:
+// relocation is not idempotent unless a window already relocated (or
+// otherwise present under its saved name at some other index) is recognised
+// and left alone on the next run, rather than relocated again — the saved
+// index stays occupied by the foreign window forever, so without this check
+// every re-run would pile up another copy.
+func TestPlanSkipsRelocationWhenSameNameExistsElsewhere(t *testing.T) {
+	live := LiveState{Sessions: map[string][]LiveWindow{"default": {{0, "h"}, {1, "tmux-restore"}, {7, "rcfiles"}}}}
+	p := BuildPlan(live, snapNet(), Options{SeedSession: "default", SeedWindow: "h"})
+	cmds := strings.Join(flatten(p), "\n")
+	if strings.Contains(cmds, "new-window -d -P -F") {
+		t.Fatalf("must not relocate when a window with the same name already exists live\n%s", cmds)
+	}
+	found := false
+	for _, a := range p.Actions {
+		if a.Kind == "note" && a.Note == "present at index 7" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected a %q skip note, actions: %+v", "present at index 7", p.Actions)
+	}
+	// default:0 "h" (already-present skip) + default:1 "rcfiles" (present
+	// elsewhere skip) = 2 skipped; net:0 "swcfg" is still created fresh.
+	if p.Skipped != 2 || p.Created != 1 || p.Relocated != 0 {
+		t.Fatalf("counts %+v", p)
 	}
 }
 

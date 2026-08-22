@@ -24,12 +24,19 @@ type Options struct {
 // Action is one step of a Plan. Kind is one of:
 //   - "tmux": Args[0] is one full tmux command line.
 //   - "contents": Args = [paneTarget, paneKey]; the applier looks up the
-//     pane's saved content by paneKey and pastes it into paneTarget.
+//     pane's saved content by paneKey and displays it in paneTarget.
 //   - "note": Note is a log line with no side effect (e.g. "skipped").
+//
+// Session names the saved session this action belongs to. Every action for
+// one saved session is contiguous in Plan.Actions (BuildPlan's outer loop is
+// per-session), so Apply can use Session to recognise "everything left in
+// this session's block" after a new-session failure, without having to parse
+// session names back out of tmux command text.
 type Action struct {
-	Kind string
-	Args []string
-	Note string
+	Kind    string
+	Args    []string
+	Note    string
+	Session string
 }
 
 // Plan is the ordered list of Actions BuildPlan produces to bring a live
@@ -41,16 +48,26 @@ type Plan struct {
 	Skipped   int
 }
 
-func (p *Plan) tmux(cmd, note string) {
-	p.Actions = append(p.Actions, Action{Kind: "tmux", Args: []string{cmd}, Note: note})
+func (p *Plan) tmux(session, cmd, note string) {
+	p.Actions = append(p.Actions, Action{Kind: "tmux", Args: []string{cmd}, Note: note, Session: session})
 }
 
-func (p *Plan) note(msg string) {
-	p.Actions = append(p.Actions, Action{Kind: "note", Note: msg})
+func (p *Plan) note(session, msg string) {
+	p.Actions = append(p.Actions, Action{Kind: "note", Note: msg, Session: session})
 }
 
-func (p *Plan) contents(paneTarget, paneKey string) {
-	p.Actions = append(p.Actions, Action{Kind: "contents", Args: []string{paneTarget, paneKey}})
+func (p *Plan) contents(session, paneTarget, paneKey string) {
+	p.Actions = append(p.Actions, Action{Kind: "contents", Args: []string{paneTarget, paneKey}, Session: session})
+}
+
+// findWindowByName returns the index of the live window named name, if any.
+func findWindowByName(liveWins []LiveWindow, name string) (int, bool) {
+	for _, lw := range liveWins {
+		if lw.Name == name {
+			return lw.Index, true
+		}
+	}
+	return 0, false
 }
 
 // shellQuote renders argv as a space-joined, single-quoted argument string
@@ -135,30 +152,39 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 			case sessionCreated && i == 0:
 				target = fmt.Sprintf("%s:%d", sess.Name, win.Index)
 				created = true
-				plan.tmux(fmt.Sprintf("new-session -d -s %s -n %s -c %s", sess.Name, win.Name, cwd0), "")
+				plan.tmux(sess.Name, fmt.Sprintf("new-session -d -s %s -n %s -c %s", sess.Name, win.Name, cwd0), "")
 			default:
 				liveName, occ := liveByIdx[win.Index]
 				switch {
 				case !occ:
 					target = fmt.Sprintf("%s:%d", sess.Name, win.Index)
 					created = true
-					plan.tmux(fmt.Sprintf("new-window -d -t %s:%d -n %s -c %s", sess.Name, win.Index, win.Name, cwd0), "")
+					plan.tmux(sess.Name, fmt.Sprintf("new-window -d -t %s:%d -n %s -c %s", sess.Name, win.Index, win.Name, cwd0), "")
 				case liveName == win.Name:
 					plan.Skipped++
-					plan.note("skipped")
+					plan.note(sess.Name, "skipped")
 					continue
 				default:
+					// RULING R27: don't relocate a same-named window that
+					// already exists live at some OTHER index — re-relocating
+					// it on every run (since the saved index stays occupied
+					// by the foreign window forever) is not idempotent.
+					if idx, ok := findWindowByName(liveWins, win.Name); ok {
+						plan.Skipped++
+						plan.note(sess.Name, fmt.Sprintf("present at index %d", idx))
+						continue
+					}
 					target = fmt.Sprintf("%s:%s", sess.Name, WinPlaceholder)
 					created = true
 					relocated = true
-					plan.tmux(fmt.Sprintf(`new-window -d -P -F "#{window_index}" -t %s: -n %s -c %s`, sess.Name, win.Name, cwd0), "relocated")
+					plan.tmux(sess.Name, fmt.Sprintf(`new-window -d -P -F "#{window_index}" -t %s: -n %s -c %s`, sess.Name, win.Name, cwd0), "relocated")
 				}
 			}
 
 			for k := 1; k < len(win.Panes); k++ {
-				plan.tmux(fmt.Sprintf("split-window -d -t %s -c %s", target, cwdOrHome(win.Panes[k].Cwd)), "")
+				plan.tmux(sess.Name, fmt.Sprintf("split-window -d -t %s -c %s", target, cwdOrHome(win.Panes[k].Cwd)), "")
 			}
-			plan.tmux(fmt.Sprintf(`select-layout -t %s "%s"`, target, win.Layout), "")
+			plan.tmux(sess.Name, fmt.Sprintf(`select-layout -t %s "%s"`, target, win.Layout), "")
 
 			activePane := 0
 			for _, pn := range win.Panes {
@@ -169,20 +195,30 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 			for _, pn := range win.Panes {
 				paneTarget := fmt.Sprintf("%s.%d", target, pn.Index)
 				if o.Contents && pn.ContentFile != "" {
-					plan.contents(paneTarget, snapshot.PaneKey(sess.Name, win.Index, pn.Index))
+					plan.contents(sess.Name, paneTarget, snapshot.PaneKey(sess.Name, win.Index, pn.Index))
 				}
 				switch pn.Restore.Kind {
 				case "argv":
 					if len(pn.Restore.Argv) > 0 { // empty argv: treated like "shell", no send-keys
-						plan.tmux(fmt.Sprintf("send-keys -t %s %s Enter", paneTarget, shellQuote(pn.Restore.Argv)), "")
+						// shellQuote's result must reach tmux as ONE key
+						// argument (%q), not spliced in as bare, space-separated
+						// tokens on the tmux command line: tmux's send-keys types
+						// each of its own arguments back-to-back with NO space
+						// inserted between them, so unquoted multi-token argv
+						// (e.g. 'tail' '-f' '/dev/null') would be typed into the
+						// pane as "tail-f/dev/null". Sending it as one quoted
+						// argument makes tmux type the whole shell-quoted string
+						// literally, spaces included, for the pane's own shell to
+						// re-parse on Enter — exactly as shellQuote intends.
+						plan.tmux(sess.Name, fmt.Sprintf("send-keys -t %s %q Enter", paneTarget, shellQuote(pn.Restore.Argv)), "")
 					}
 				case "claude":
-					plan.tmux(fmt.Sprintf("send-keys -t %s %s Enter", paneTarget, shellQuote([]string{o.ClaudeResumePath, pn.Restore.ClaudeSession})), "")
+					plan.tmux(sess.Name, fmt.Sprintf("send-keys -t %s %q Enter", paneTarget, shellQuote([]string{o.ClaudeResumePath, pn.Restore.ClaudeSession})), "")
 				}
 			}
-			plan.tmux(fmt.Sprintf("select-pane -t %s.%d", target, activePane), "")
+			plan.tmux(sess.Name, fmt.Sprintf("select-pane -t %s.%d", target, activePane), "")
 			if !win.AutomaticRename {
-				plan.tmux(fmt.Sprintf("set-window-option -t %s automatic-rename off", target), "")
+				plan.tmux(sess.Name, fmt.Sprintf("set-window-option -t %s automatic-rename off", target), "")
 			}
 
 			if relocated {
@@ -191,7 +227,7 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 				plan.Created++
 			}
 			if created && win.Index == sess.ActiveWindow {
-				plan.tmux(fmt.Sprintf("select-window -t %s", target), "")
+				plan.tmux(sess.Name, fmt.Sprintf("select-window -t %s", target), "")
 			}
 		}
 	}

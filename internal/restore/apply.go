@@ -4,13 +4,19 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/mithro/go-tmux-saver/internal/tmuxctl"
 )
 
-// Report summarises what Apply did against a live tmux server.
+// Report summarises what Apply actually did against a live tmux server.
+// Created and Relocated count only creations that SUCCEEDED (RULING R28 —
+// Apply measures real outcomes, it does not copy the Plan's structural
+// counts); Skipped counts the plan's already-satisfied windows (its "note"
+// actions, which never fail since they have no tmux side effect at all).
+// Any action's failure is recorded in Notes.
 type Report struct {
 	Created, Relocated, Skipped int
 	Notes                       []string
@@ -21,12 +27,25 @@ type Report struct {
 // window's "new-window ... -P -F" reply, and stays in effect (unchanged)
 // until the next relocation resolves it to a new value — see BuildPlan's doc
 // comment for why every use of one relocation's placeholder is contiguous in
-// the action list.
+// the action list. Any other create (new-session, or a plain non-relocated
+// new-window) clears a stale placeholder so it can never leak into a later
+// block by accident.
 //
-// "contents" actions replay saved pane scrollback by writing it to a private
-// temp file, `load-buffer`-ing it into a dedicated tmux buffer ("gts") and
-// `paste-buffer`-ing that into the target pane (no shell involvement), then
-// removing the temp file.
+// "contents" actions replay saved pane scrollback WITHOUT ever feeding it to
+// the shell as input (RULING R26: load-buffer/paste-buffer types the bytes
+// as keystrokes into a live interactive shell — every newline in the saved
+// scrollback would execute the preceding line, and any "-e"-style escape
+// sequence would be interpreted by readline). Instead, the bytes are written
+// to <replayDir>/<paneKey>.txt (0600; replayDir is created 0700 as needed)
+// and DISPLAYED via `send-keys -t <target> " cat '<path>'" Enter` — a single
+// quoted key argument, so cat runs asynchronously in the pane exactly as if
+// a user had typed it, with a leading space so history-ignore-space shells
+// don't record it. The files are left in place; the caller (the CLI) owns
+// cleaning up old replay directories.
+//
+// ctx is checked at the top of every loop iteration (FINDING 3): once it's
+// done, Apply stops immediately and returns ctx.Err(), along with whatever
+// Report it had accumulated so far.
 //
 // An error from an ordinary action is appended to Report.Notes and does not
 // stop the rest of the plan — a later re-run of an up-to-date plan (built
@@ -36,12 +55,17 @@ type Report struct {
 // succeed against a window that doesn't exist (and, for a relocation, its
 // WinPlaceholder can't even be resolved), the remaining actions of that
 // block are skipped — processing resumes at the next new-session/new-window
-// action, so unrelated sessions/windows are unaffected.
-func Apply(ctx context.Context, t tmuxctl.Transport, p Plan, contents func(paneKey string) ([]byte, bool)) (Report, error) {
-	report := Report{Created: p.Created, Relocated: p.Relocated, Skipped: p.Skipped}
+// action for a plain window failure. A failed new-session goes further: it
+// aborts EVERY remaining action of that whole saved session (tracked by
+// name, via Action.Session), not just its first window — every later
+// new-window in that session targets a session that was never created, so
+// there is nothing for any of them to succeed against either.
+func Apply(ctx context.Context, t tmuxctl.Transport, p Plan, contents func(paneKey string) ([]byte, bool), replayDir string) (Report, error) {
+	var report Report
 
-	var winTarget string // most recently resolved WinPlaceholder value, once a relocation has replied
-	aborted := false     // true while skipping the remainder of a failed creation's block
+	var winTarget string      // most recently resolved WinPlaceholder value, once a relocation has replied
+	var abortedSession string // non-empty once a new-session has failed: skip the rest of that session
+	windowAborted := false    // true while skipping the remainder of one failed window's block
 
 	resolve := func(s string) string {
 		if winTarget == "" {
@@ -51,16 +75,28 @@ func Apply(ctx context.Context, t tmuxctl.Transport, p Plan, contents func(paneK
 	}
 
 	for _, a := range p.Actions {
+		if err := ctx.Err(); err != nil {
+			return report, err
+		}
+
+		if abortedSession != "" && a.Session == abortedSession {
+			continue
+		}
+
 		switch a.Kind {
 		case "note":
-			// No side effect (e.g. "skipped" for an already-matching window).
+			report.Skipped++
 
 		case "tmux":
 			cmd := a.Args[0]
-			create := isCreateCmd(cmd)
+			sessionCreate := strings.HasPrefix(cmd, "new-session ")
+			create := sessionCreate || strings.HasPrefix(cmd, "new-window ")
 			if create {
-				aborted = false // a new window/session block starts here
-			} else if aborted {
+				windowAborted = false
+				if a.Note != "relocated" {
+					winTarget = "" // never let a stale relocation target leak into a new block
+				}
+			} else if windowAborted {
 				continue
 			}
 
@@ -69,22 +105,30 @@ func Apply(ctx context.Context, t tmuxctl.Transport, p Plan, contents func(paneK
 			if err != nil {
 				report.Notes = append(report.Notes, fmt.Sprintf("%s: %v", resolved, err))
 				if create {
-					aborted = true
+					windowAborted = true
+					if sessionCreate {
+						abortedSession = a.Session
+					}
 				}
 				continue
 			}
-			if a.Note == "relocated" {
+
+			switch {
+			case a.Note == "relocated":
 				idx, ok := firstLine(lines)
 				if !ok {
 					report.Notes = append(report.Notes, fmt.Sprintf("%s: no window index in reply", resolved))
-					aborted = true
+					windowAborted = true
 					continue
 				}
 				winTarget = idx
+				report.Relocated++
+			case create:
+				report.Created++
 			}
 
 		case "contents":
-			if aborted {
+			if windowAborted {
 				continue
 			}
 			target := resolve(a.Args[0])
@@ -93,17 +137,20 @@ func Apply(ctx context.Context, t tmuxctl.Transport, p Plan, contents func(paneK
 			if !ok {
 				continue // nothing saved for this pane; not an error
 			}
-			if err := replayContents(ctx, t, target, data); err != nil {
+			path, err := writeReplayFile(replayDir, paneKey, data)
+			if err != nil {
 				report.Notes = append(report.Notes, fmt.Sprintf("contents %s: %v", target, err))
+				continue
+			}
+			keys := " cat " + shellQuote([]string{path})
+			cmd := fmt.Sprintf("send-keys -t %s %q Enter", target, keys)
+			if _, err := t.Run(ctx, cmd); err != nil {
+				report.Notes = append(report.Notes, fmt.Sprintf("%s: %v", cmd, err))
 			}
 		}
 	}
 
 	return report, nil
-}
-
-func isCreateCmd(cmd string) bool {
-	return strings.HasPrefix(cmd, "new-session ") || strings.HasPrefix(cmd, "new-window ")
 }
 
 // firstLine returns the first non-blank line of lines, verified to parse as
@@ -122,33 +169,15 @@ func firstLine(lines []string) (string, bool) {
 	return "", false
 }
 
-// replayContents pastes data into target via a private temp file, tmux's
-// load-buffer/paste-buffer (no shell involvement), removing the temp file
-// once done.
-func replayContents(ctx context.Context, t tmuxctl.Transport, target string, data []byte) error {
-	f, err := os.CreateTemp("", "gts-restore-*.bin")
-	if err != nil {
-		return err
+// writeReplayFile writes data to <replayDir>/<paneKey>.txt (0600), creating
+// replayDir (0700) if needed, and returns the file's path.
+func writeReplayFile(replayDir, paneKey string, data []byte) (string, error) {
+	if err := os.MkdirAll(replayDir, 0o700); err != nil {
+		return "", err
 	}
-	tmpPath := f.Name()
-	defer os.Remove(tmpPath)
-
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
+	path := filepath.Join(replayDir, paneKey+".txt")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return "", err
 	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmpPath, 0o600); err != nil {
-		return err
-	}
-
-	if _, err := t.Run(ctx, fmt.Sprintf("load-buffer -b gts %s", tmpPath)); err != nil {
-		return err
-	}
-	if _, err := t.Run(ctx, fmt.Sprintf("paste-buffer -d -b gts -t %s", target)); err != nil {
-		return err
-	}
-	return nil
+	return path, nil
 }
