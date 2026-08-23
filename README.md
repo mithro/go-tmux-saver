@@ -20,6 +20,25 @@ CGO_ENABLED=0 go build -ldflags "-s -w -X github.com/mithro/go-tmux-saver/intern
 Requires Go 1.26+. The binary is self-contained (`CGO_ENABLED=0`); copy it
 anywhere on `$PATH`.
 
+### Install from the apt repository (Debian/Ubuntu, amd64 + arm64)
+
+Every push to `main` builds a release: the [release workflow](.github/workflows/release.yml)
+tags the commit with the next `vX.Y` (unless it is already tagged), builds
+static binaries and `.deb`s, publishes a [GitHub Release](https://github.com/mithro/go-tmux-saver/releases)
+and refreshes the signed apt repository at <https://mith.ro/go-tmux-saver/>.
+
+```sh
+curl -fsSL https://mith.ro/go-tmux-saver/go-tmux-saver.gpg \
+  | sudo tee /etc/apt/keyrings/mithro-go-tmux-saver.gpg > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/mithro-go-tmux-saver.gpg] https://mith.ro/go-tmux-saver/ ./" \
+  | sudo tee /etc/apt/sources.list.d/mithro-go-tmux-saver.list
+sudo apt update && sudo apt install go-tmux-saver
+```
+
+The package installs only `/usr/bin/go-tmux-saver`; per-user units,
+keybindings and `config.json` are created by `go-tmux-saver setup install`.
+`go-tmux-saver version` prints the release tag (`git describe` of the build).
+
 ## Usage
 
 Every subcommand accepts `--config <path>` (default: the XDG config path),
