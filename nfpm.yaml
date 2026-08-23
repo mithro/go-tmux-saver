@@ -1,0 +1,37 @@
+# nfpm packaging config — https://nfpm.goreleaser.com/configuration/
+# VERSION and ARCH are expanded from the environment by nfpm at package time
+# (nfpm does not expand them inside contents[].src, so the binary is always
+# packaged from the fixed path ./dist/go-tmux-saver — build it there first):
+#   VERSION=0.2 ARCH=arm64 nfpm package -p deb -f nfpm.yaml -t dist/
+name: go-tmux-saver
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+# Keep the Debian version exactly as given (X.Y from the vX.Y tag); without
+# this nfpm re-renders it as semver (0.2 -> 0.2.0).
+version_schema: none
+section: utils
+priority: optional
+maintainer: Tim 'mithro' Ansell <me@mith.ro>
+description: |
+  Fast, robust tmux session save/restore.
+  Snapshots every session/window/pane (layout, cwd, running command,
+  scrollback) over one tmux control-mode connection, restores additively on
+  tmux-server start, and manages its own systemd user timer, watchdog, alerts
+  and tmux keybindings via `go-tmux-saver setup`.
+vendor: mithro
+homepage: https://github.com/mithro/go-tmux-saver
+license: Apache-2.0
+depends:
+  - tmux (>= 3.5)
+recommends:
+  - postfix | mail-transport-agent
+contents:
+  - src: ./dist/go-tmux-saver
+    dst: /usr/bin/go-tmux-saver
+    file_info:
+      mode: 0755
+  - src: ./README.md
+    dst: /usr/share/doc/go-tmux-saver/README.md
+  - src: ./LICENSE
+    dst: /usr/share/doc/go-tmux-saver/copyright
