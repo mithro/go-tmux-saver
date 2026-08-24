@@ -104,3 +104,65 @@ func TestParseExitInsideBlock(t *testing.T) {
 		t.Fatalf("err = %v, want ended-inside-block", err)
 	}
 }
+
+// TestParseRepliesTmux35aTranscript covers issue #10: a REAL control-mode
+// byte stream recorded from stock tmux 3.5a on big-storage (the fleet's
+// oldest supported version), driving the exact wire commands Dial, the
+// collector and the restore path send against a synthetic server layout —
+// %begin/%end framing, tab-separated -F output with a quoted/backslashed
+// window name, a %error block, the relocation new-window -P reply, and the
+// %session-changed/%unlinked-window-* notifications, ending in %exit.
+func TestParseRepliesTmux35aTranscript(t *testing.T) {
+	raw, err := os.ReadFile("testdata/transcript-3.5a.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Strip the provenance header (leading # comment lines).
+	stream := ""
+	for _, line := range strings.SplitAfter(string(raw), "\n") {
+		if strings.HasPrefix(line, "#") {
+			continue
+		}
+		stream += line
+	}
+
+	out := make(chan Reply, 32)
+	if err := ParseReplies(strings.NewReader(stream), out); err != nil {
+		t.Fatalf("ParseReplies: %v", err)
+	}
+	close(out)
+	var replies []Reply
+	for r := range out {
+		replies = append(replies, r)
+	}
+
+	// attach, display-message, list-clients, list-sessions, list-windows,
+	// list-panes, capture-pane, %error, new-window -P, send-keys, kill-window
+	if len(replies) != 11 {
+		t.Fatalf("replies = %d, want 11", len(replies))
+	}
+	if replies[0].Err || len(replies[0].Lines) != 0 {
+		t.Errorf("attach block = %+v, want empty success", replies[0])
+	}
+	if len(replies[4].Lines) != 3 || !strings.Contains(replies[4].Lines[2], "ti tle\"q\\uote") {
+		t.Errorf("list-windows block = %q, want 3 lines incl. the hostile window name", replies[4].Lines)
+	}
+	// 3.5a stores new-window -n names RAW (no vis encoding) — the transcript
+	// pins that: one literal backslash, exactly as passed.
+	if strings.Contains(replies[4].Lines[2], `q\\uote`) {
+		t.Errorf("3.5a window name unexpectedly vis-encoded: %q", replies[4].Lines[2])
+	}
+	if !replies[7].Err || !strings.Contains(strings.Join(replies[7].Lines, " "), "can't find session") {
+		t.Errorf("block 7 = %+v, want the %%error reply", replies[7])
+	}
+	if len(replies[8].Lines) != 1 || replies[8].Lines[0] != "2" {
+		t.Errorf("new-window -P reply = %q, want the window index", replies[8].Lines)
+	}
+	for i, r := range replies {
+		for _, l := range r.Lines {
+			if strings.HasPrefix(l, "%session-changed") || strings.HasPrefix(l, "%unlinked-window") {
+				t.Errorf("notification leaked into reply %d: %q", i, l)
+			}
+		}
+	}
+}
