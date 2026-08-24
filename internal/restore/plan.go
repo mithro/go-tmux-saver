@@ -57,6 +57,12 @@ func (p *Plan) note(session, msg string) {
 	p.Actions = append(p.Actions, Action{Kind: "note", Note: msg, Session: session})
 }
 
+// warn records a message the applier must surface in Report.Notes (unlike
+// the count-only "note" kind) — used for whole-session refusals (issue #5).
+func (p *Plan) warn(session, msg string) {
+	p.Actions = append(p.Actions, Action{Kind: "warn", Note: msg, Session: session})
+}
+
 func (p *Plan) contents(session, paneTarget, paneKey string) {
 	p.Actions = append(p.Actions, Action{Kind: "contents", Args: []string{paneTarget, paneKey}, Session: session})
 }
@@ -152,6 +158,21 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 	var plan Plan
 
 	for _, sess := range snap.Sessions {
+		// Issue #5, probe-verified on tmux 3.5a: a session name containing
+		// ':' cannot be addressed by ANY target spelling — "a:b:1" parses as
+		// window "b:1", and the exact-match form "=a:b:1" as session "a" —
+		// so every post-creation action would fail. Refuse the whole
+		// session loudly rather than half-restore it. ('.' names are fine:
+		// the full "sess:idx" form splits at the colon first.)
+		if strings.Contains(sess.Name, ":") {
+			plan.warn(sess.Name, fmt.Sprintf("session %q skipped: tmux targets cannot address a session name containing ':' (%d windows not restored)", sess.Name, len(sess.Windows)))
+			for range sess.Windows {
+				plan.Skipped++
+				plan.note(sess.Name, "skipped: unaddressable session name")
+			}
+			continue
+		}
+
 		liveWins, sessExists := live.Sessions[sess.Name]
 		liveByIdx := map[int]string{}
 		for _, lw := range liveWins {
@@ -167,14 +188,14 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 
 			switch {
 			case sessionCreated && i == 0:
-				target = fmt.Sprintf("%s:%d", sess.Name, win.Index)
+				target = fmt.Sprintf("=%s:%d", sess.Name, win.Index)
 				created = true
 				plan.tmux(sess.Name, fmt.Sprintf("new-session -d -s %s -n %s%s", tmuxQuote(sess.Name), tmuxQuote(win.Name), cwdArg(cwd0)), "")
 			default:
 				liveName, occ := liveByIdx[win.Index]
 				switch {
 				case !occ:
-					target = fmt.Sprintf("%s:%d", sess.Name, win.Index)
+					target = fmt.Sprintf("=%s:%d", sess.Name, win.Index)
 					created = true
 					plan.tmux(sess.Name, fmt.Sprintf("new-window -d -t %s -n %s%s", tmuxQuote(target), tmuxQuote(win.Name), cwdArg(cwd0)), "")
 				case liveName == win.Name:
@@ -191,10 +212,10 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 						plan.note(sess.Name, fmt.Sprintf("present at index %d", idx))
 						continue
 					}
-					target = fmt.Sprintf("%s:%s", sess.Name, WinPlaceholder)
+					target = fmt.Sprintf("=%s:%s", sess.Name, WinPlaceholder)
 					created = true
 					relocated = true
-					plan.tmux(sess.Name, fmt.Sprintf(`new-window -d -P -F "#{window_index}" -t %s -n %s%s`, tmuxQuote(sess.Name+":"), tmuxQuote(win.Name), cwdArg(cwd0)), "relocated")
+					plan.tmux(sess.Name, fmt.Sprintf(`new-window -d -P -F "#{window_index}" -t %s -n %s%s`, tmuxQuote("="+sess.Name+":"), tmuxQuote(win.Name), cwdArg(cwd0)), "relocated")
 				}
 			}
 

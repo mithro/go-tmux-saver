@@ -41,20 +41,20 @@ func TestPlanOnSeedServer(t *testing.T) {
 	p := BuildPlan(live, snapNet(), Options{ClaudeResumePath: "/home/tim/bin/claude-resume", Contents: true, SeedSession: "default", SeedWindow: "h"})
 	cmds := strings.Join(flatten(p), "\n")
 	for _, want := range []string{
-		`new-window -d -t "default:1" -n "rcfiles" -c "/tmp"`,
+		`new-window -d -t "=default:1" -n "rcfiles" -c "/tmp"`,
 		`new-session -d -s "net" -n "swcfg" -c "/"`,
-		`split-window -d -t "net:0" -c "/home/tim"`, // missing cwd → $HOME fallback (HOME=/home/tim in test via t.Setenv)
-		`select-layout -t "net:0" "L2"`,
-		`send-keys -t "net:0.0" "'ssh' 'sw it'\\''s'" Enter`,
-		`send-keys -t "default:1.0" "'/home/tim/bin/claude-resume' 'abc'" Enter`,
-		`select-window -t "net:0"`,
-		`select-window -t "default:1"`,
+		`split-window -d -t "=net:0" -c "/home/tim"`, // missing cwd → $HOME fallback (HOME=/home/tim in test via t.Setenv)
+		`select-layout -t "=net:0" "L2"`,
+		`send-keys -t "=net:0.0" "'ssh' 'sw it'\\''s'" Enter`,
+		`send-keys -t "=default:1.0" "'/home/tim/bin/claude-resume' 'abc'" Enter`,
+		`select-window -t "=net:0"`,
+		`select-window -t "=default:1"`,
 	} {
 		if !strings.Contains(cmds, want) {
 			t.Errorf("plan missing %q\n%s", want, cmds)
 		}
 	}
-	if strings.Contains(cmds, `rename-window -t "default:0"`) || strings.Contains(cmds, `new-window -d -t "default:0"`) {
+	if strings.Contains(cmds, `rename-window -t "=default:0"`) || strings.Contains(cmds, `new-window -d -t "=default:0"`) {
 		t.Error("seed window must not be touched")
 	}
 	if p.Created != 2 || p.Skipped != 1 || p.Relocated != 0 { // created rcfiles + net:0; default:0 h skipped (same name)
@@ -66,10 +66,10 @@ func TestPlanRelocatesOnConflict(t *testing.T) {
 	live := LiveState{Sessions: map[string][]LiveWindow{"default": {{0, "h"}, {1, "tmux-restore"}}}}
 	p := BuildPlan(live, snapNet(), Options{SeedSession: "default", SeedWindow: "h"})
 	cmds := strings.Join(flatten(p), "\n")
-	if strings.Contains(cmds, `rename-window -t "default:1"`) || strings.Contains(cmds, `new-window -d -t "default:1" `) {
+	if strings.Contains(cmds, `rename-window -t "=default:1"`) || strings.Contains(cmds, `new-window -d -t "=default:1" `) {
 		t.Fatalf("must never touch occupied window default:1\n%s", cmds)
 	}
-	if !strings.Contains(cmds, `new-window -d -P -F "#{window_index}" -t "default:" -n "rcfiles" -c "/tmp"`) || p.Relocated != 1 {
+	if !strings.Contains(cmds, `new-window -d -P -F "#{window_index}" -t "=default:" -n "rcfiles" -c "/tmp"`) || p.Relocated != 1 {
 		t.Fatalf("expected relocation\n%s %+v", cmds, p)
 	}
 }
@@ -134,7 +134,7 @@ func TestPlanSelectWindowNotDeferredAcrossRelocations(t *testing.T) {
 				secondRelocIdx = i
 			}
 		}
-		if cmd == `select-window -t "default:{{WIN}}"` {
+		if cmd == `select-window -t "=default:{{WIN}}"` {
 			selectCount++
 			if selectIdx == -1 {
 				selectIdx = i
@@ -210,7 +210,7 @@ func flatten(p Plan) []string {
 // names, cwds and every composed "-t sess:idx[.pane]" target are attacker-
 // influenced data (a tmux session can be named anything), so each must be
 // spliced into the tmux command line as ONE tmuxQuote'd argument. Before
-// this fix a session named `evil;kill-window -t default:0` executed
+// this fix a session named `evil;kill-window -t default.0` executed
 // kill-window against the live server (probe-confirmed), and a cwd
 // containing a space split into two arguments.
 func TestPlanQuotesDataDerivedArguments(t *testing.T) {
@@ -223,7 +223,7 @@ func TestPlanQuotesDataDerivedArguments(t *testing.T) {
 		}
 	}
 
-	evil := "evil;kill-window -t default:0"
+	evil := "evil;kill-window -t default.0"
 	snap := &snapshot.Snapshot{Sessions: []snapshot.Session{
 		{Name: evil, ActiveWindow: 0, Windows: []snapshot.Window{
 			{Index: 0, Name: "a;b c", Layout: "L 0", Panes: []snapshot.Pane{
@@ -243,17 +243,17 @@ func TestPlanQuotesDataDerivedArguments(t *testing.T) {
 	joined := strings.Join(cmds, "\n")
 
 	for _, want := range []string{
-		`new-session -d -s "evil;kill-window -t default:0" -n "a;b c" -c "` + cwdSpace + `"`,
-		`split-window -d -t "evil;kill-window -t default:0:0" -c "` + cwdSemi + `"`,
-		`select-layout -t "evil;kill-window -t default:0:0" "L 0"`,
-		`send-keys -t "evil;kill-window -t default:0:0.0" "'echo' 'hi there'" Enter`,
-		`select-pane -t "evil;kill-window -t default:0:0.0"`,
-		`set-window-option -t "evil;kill-window -t default:0:0" automatic-rename off`,
-		`select-window -t "evil;kill-window -t default:0:0"`,
-		`new-window -d -P -F "#{window_index}" -t "sess two:" -n "reloc me" -c "` + cwdSpace + `"`,
-		`new-window -d -t "sess two:9" -n "free idx" -c "` + cwdSemi + `"`,
-		`select-layout -t "sess two:{{WIN}}" "L 3"`,
-		`select-window -t "sess two:9"`,
+		`new-session -d -s "evil;kill-window -t default.0" -n "a;b c" -c "` + cwdSpace + `"`,
+		`split-window -d -t "=evil;kill-window -t default.0:0" -c "` + cwdSemi + `"`,
+		`select-layout -t "=evil;kill-window -t default.0:0" "L 0"`,
+		`send-keys -t "=evil;kill-window -t default.0:0.0" "'echo' 'hi there'" Enter`,
+		`select-pane -t "=evil;kill-window -t default.0:0.0"`,
+		`set-window-option -t "=evil;kill-window -t default.0:0" automatic-rename off`,
+		`select-window -t "=evil;kill-window -t default.0:0"`,
+		`new-window -d -P -F "#{window_index}" -t "=sess two:" -n "reloc me" -c "` + cwdSpace + `"`,
+		`new-window -d -t "=sess two:9" -n "free idx" -c "` + cwdSemi + `"`,
+		`select-layout -t "=sess two:{{WIN}}" "L 3"`,
+		`select-window -t "=sess two:9"`,
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("plan missing %q\n%s", want, joined)
@@ -291,4 +291,70 @@ func unquotedParts(cmd string) string {
 		}
 	}
 	return b.String()
+}
+
+// TestBuildPlanExactMatchTargets covers issue #5: every -t target must
+// carry tmux's '=' exact-match prefix, so a session named "plain" can
+// never prefix- or fnmatch-match a different live session ("plainlong",
+// or one with wildcard characters). Probe-verified on tmux 3.5a: '=' is
+// accepted by every command shape the plan emits, including the
+// relocation form "=sess:" and pane targets "=sess:idx.pane".
+func TestBuildPlanExactMatchTargets(t *testing.T) {
+	snap := &snapshot.Snapshot{Sessions: []snapshot.Session{
+		{Name: "plain", ActiveWindow: 0, Windows: []snapshot.Window{
+			{Index: 0, Name: "w0", Layout: "L", Panes: []snapshot.Pane{
+				{Index: 0, Cwd: "/", Active: true, Restore: snapshot.Restore{Kind: "shell"}},
+			}},
+		}},
+	}}
+	plan := BuildPlan(LiveState{Sessions: map[string][]LiveWindow{"seed": {{Index: 0, Name: "h"}}}}, snap, Options{})
+	for _, a := range plan.Actions {
+		if a.Kind != "tmux" {
+			continue
+		}
+		cmd := a.Args[0]
+		if strings.HasPrefix(cmd, "new-session ") {
+			continue // -s takes the raw name, no target syntax
+		}
+		if !strings.Contains(cmd, `-t "=plain`) {
+			t.Errorf("target without '=' exact prefix: %s", cmd)
+		}
+	}
+}
+
+// TestBuildPlanRefusesColonSessionNames covers issue #5's unaddressable
+// case, probe-verified on tmux 3.5a: a session name containing ':' cannot
+// be addressed by any target spelling ("a:b:1" → can't find window "b:1";
+// "=a:b:1" → can't find session "a"), so the whole session is skipped with
+// a loud warn note instead of half-restoring and erroring on every
+// follow-up action.
+func TestBuildPlanRefusesColonSessionNames(t *testing.T) {
+	snap := &snapshot.Snapshot{Sessions: []snapshot.Session{
+		{Name: "a:b", ActiveWindow: 0, Windows: []snapshot.Window{
+			{Index: 0, Name: "w0", Layout: "L", Panes: []snapshot.Pane{{Index: 0, Cwd: "/", Restore: snapshot.Restore{Kind: "shell"}}}},
+			{Index: 1, Name: "w1", Layout: "L", Panes: []snapshot.Pane{{Index: 0, Cwd: "/", Restore: snapshot.Restore{Kind: "shell"}}}},
+		}},
+		{Name: "good", ActiveWindow: 0, Windows: []snapshot.Window{
+			{Index: 0, Name: "w0", Layout: "L", Panes: []snapshot.Pane{{Index: 0, Cwd: "/", Restore: snapshot.Restore{Kind: "shell"}}}},
+		}},
+	}}
+	plan := BuildPlan(LiveState{Sessions: map[string][]LiveWindow{"seed": {{Index: 0, Name: "h"}}}}, snap, Options{})
+	if plan.Skipped != 2 {
+		t.Errorf("Skipped = %d, want 2 (both a:b windows)", plan.Skipped)
+	}
+	if plan.Created != 1 {
+		t.Errorf("Created = %d, want 1 (the good session)", plan.Created)
+	}
+	warn := ""
+	for _, a := range plan.Actions {
+		if a.Kind == "tmux" && strings.Contains(a.Args[0], "a:b") {
+			t.Errorf("tmux action emitted for unaddressable session: %s", a.Args[0])
+		}
+		if a.Kind == "warn" {
+			warn = a.Note
+		}
+	}
+	if !strings.Contains(warn, "a:b") || !strings.Contains(warn, ":") {
+		t.Errorf("warn note = %q, want it to name the session and the ':' rule", warn)
+	}
 }
