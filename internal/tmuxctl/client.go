@@ -27,6 +27,12 @@ type Client struct {
 	parseErr chan error
 	mu       sync.Mutex
 	desynced atomic.Bool
+	// parseOnce/finalParseErr capture the read loop's one-shot exit error
+	// the first time the closed replies channel is observed, so every later
+	// next() call can keep reporting it without blocking on the
+	// already-drained parseErr channel (issue #7).
+	parseOnce     sync.Once
+	finalParseErr error
 }
 
 var _ Transport = (*Client)(nil)
@@ -156,6 +162,15 @@ func (c *Client) next(ctx context.Context) (Reply, error) {
 	select {
 	case r, ok := <-c.replies:
 		if !ok {
+			// The read loop has exited — surface WHY (issue #7): an EOF
+			// inside an open %begin block is a very different failure from
+			// a clean close, and a bare "control connection closed" hid
+			// that detail. The goroutine sends its result before closing
+			// replies, so this receive never blocks.
+			c.parseOnce.Do(func() { c.finalParseErr = <-c.parseErr })
+			if c.finalParseErr != nil {
+				return Reply{}, fmt.Errorf("control connection closed: %w", c.finalParseErr)
+			}
 			return Reply{}, fmt.Errorf("control connection closed")
 		}
 		return r, nil

@@ -181,7 +181,33 @@ func writeJSONAtomic(path string, v any) (err error) {
 	return os.Rename(part, path)
 }
 
+// fsyncDir fsyncs directory dir, making renames/creates inside it durable
+// on disk. File CONTENTS are fsynced at write time (writeCompressed /
+// writeJSONAtomic); without the directory fsync a crash+reboot could lose
+// the directory ENTRIES those writes created (issue #7).
+func fsyncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	err = d.Sync()
+	if cerr := d.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
 func (st *Staged) Promote() (string, error) {
+	// Issue #7: make the staged tree's directory entries durable before it
+	// is renamed into place, and the renames themselves durable after —
+	// `last` must never survive a crash pointing at a snapshot whose
+	// entries were lost.
+	if err := fsyncDir(filepath.Join(st.tmpDir, "panes")); err != nil {
+		return "", err
+	}
+	if err := fsyncDir(st.tmpDir); err != nil {
+		return "", err
+	}
 	final := filepath.Join(st.store.Dir, st.name)
 	if err := os.Rename(st.tmpDir, final); err != nil {
 		return "", err
@@ -192,13 +218,20 @@ func (st *Staged) Promote() (string, error) {
 	if err := os.Symlink(st.name, tmpLink); err != nil {
 		return "", err
 	}
-	return final, os.Rename(tmpLink, link)
+	if err := os.Rename(tmpLink, link); err != nil {
+		return "", err
+	}
+	// One fsync of the store dir covers both renames (snapshot dir + last).
+	return final, fsyncDir(st.store.Dir)
 }
 
 func (st *Staged) Reject() (string, error) {
 	dst := filepath.Join(st.store.Dir, "rejected", st.name)
 	os.RemoveAll(dst)
-	return dst, os.Rename(st.tmpDir, dst)
+	if err := os.Rename(st.tmpDir, dst); err != nil {
+		return dst, err
+	}
+	return dst, fsyncDir(filepath.Dir(dst))
 }
 
 func (st *Staged) Discard() error { return os.RemoveAll(st.tmpDir) }
