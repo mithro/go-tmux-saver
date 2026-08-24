@@ -33,3 +33,17 @@ func TestResolve(t *testing.T) {
 		t.Fatalf("unknown pid: %+v", r)
 	}
 }
+
+// TestResolveStaleRegistryFallsThrough covers the issue-#8 gap: a claude
+// process whose registry entry is STALE (procStart no longer matches — the
+// pid was recycled or the file outlived the process) must not stop
+// resolution; rules 2–4 still run, and here rule 2 (--resume on the live
+// cmdline) recovers the real session id.
+func TestResolveStaleRegistryFallsThrough(t *testing.T) {
+	tb, _ := Scan("testdata/proc")
+	reg := ClaudeRegistry{Dir: "testdata/sessions"}
+	r := Resolve(tb, reg, 600, DefaultAllowlist) // bash → claude (stale 601.json, live --resume)
+	if r.Kind != "claude" || r.ClaudeSession != "bbbbbbbb-cccc-dddd-eeee-ffffffffffff" {
+		t.Fatalf("stale registry should fall through to the cmdline --resume rule: %+v", r)
+	}
+}

@@ -92,3 +92,15 @@ func TestParseEOFInsideBlock(t *testing.T) {
 		t.Errorf("want no replies sent, got %d", len(ch))
 	}
 }
+
+// TestParseExitInsideBlock covers the issue-#8 gap from Task 2: a %exit
+// arriving while a %begin block is still open means the server died before
+// answering — that must surface as the ended-inside-block error, never as
+// a clean nil return (which the bare-%exit path outside a block produces).
+func TestParseExitInsideBlock(t *testing.T) {
+	out := make(chan Reply, 4)
+	err := ParseReplies(strings.NewReader("%begin 1 5 0\nsome output\n%exit\n"), out)
+	if err == nil || !strings.Contains(err.Error(), "inside block 5") {
+		t.Fatalf("err = %v, want ended-inside-block", err)
+	}
+}
