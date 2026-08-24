@@ -31,6 +31,11 @@ type Fake struct {
 
 var _ Transport = (*Fake)(nil)
 
+// Run answers from Replies, then Default. A command with neither fails with
+// a plain error that is deliberately NOT a *CmdError (issue #8): production
+// code degrades gracefully on tmux %error (a vanished pane's capture-pane
+// becomes a warning), so a forgotten stub returning *CmdError would let a
+// test silently exercise the degraded path instead of failing loudly.
 func (f *Fake) Run(_ context.Context, cmd string) ([]string, error) {
 	f.Calls = append(f.Calls, cmd)
 	if r, ok := f.Replies[cmd]; ok {
@@ -39,7 +44,7 @@ func (f *Fake) Run(_ context.Context, cmd string) ([]string, error) {
 	if f.Default != nil {
 		return append([]string(nil), f.Default...), nil
 	}
-	return nil, &CmdError{Cmd: cmd, Lines: []string{"fake: no reply configured"}}
+	return nil, fmt.Errorf("tmuxctl.Fake: no reply configured for %q — add it to Replies or set Default", cmd)
 }
 
 func (f *Fake) Close() error { return nil }
