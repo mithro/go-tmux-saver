@@ -187,17 +187,22 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 			cwd0 := firstCwd(win.Panes)
 
 			switch {
+			// -s/-n VALUES are vis-decoded (tmuxctl.UnvisName): tmux
+			// vis(3)-encodes names at creation, so passing the snapshot's
+			// (stored, encoded) spelling verbatim would double every
+			// backslash again. -t TARGETS keep the stored spelling — target
+			// matching compares against the encoded name verbatim.
 			case sessionCreated && i == 0:
 				target = fmt.Sprintf("=%s:%d", sess.Name, win.Index)
 				created = true
-				plan.tmux(sess.Name, fmt.Sprintf("new-session -d -s %s -n %s%s", tmuxQuote(sess.Name), tmuxQuote(win.Name), cwdArg(cwd0)), "")
+				plan.tmux(sess.Name, fmt.Sprintf("new-session -d -s %s -n %s%s", tmuxQuote(tmuxctl.UnvisName(sess.Name)), tmuxQuote(tmuxctl.UnvisName(win.Name)), cwdArg(cwd0)), "")
 			default:
 				liveName, occ := liveByIdx[win.Index]
 				switch {
 				case !occ:
 					target = fmt.Sprintf("=%s:%d", sess.Name, win.Index)
 					created = true
-					plan.tmux(sess.Name, fmt.Sprintf("new-window -d -t %s -n %s%s", tmuxQuote(target), tmuxQuote(win.Name), cwdArg(cwd0)), "")
+					plan.tmux(sess.Name, fmt.Sprintf("new-window -d -t %s -n %s%s", tmuxQuote(target), tmuxQuote(tmuxctl.UnvisName(win.Name)), cwdArg(cwd0)), "")
 				case liveName == win.Name:
 					plan.Skipped++
 					plan.note(sess.Name, "skipped")
@@ -215,7 +220,7 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 					target = fmt.Sprintf("=%s:%s", sess.Name, WinPlaceholder)
 					created = true
 					relocated = true
-					plan.tmux(sess.Name, fmt.Sprintf(`new-window -d -P -F "#{window_index}" -t %s -n %s%s`, tmuxQuote("="+sess.Name+":"), tmuxQuote(win.Name), cwdArg(cwd0)), "relocated")
+					plan.tmux(sess.Name, fmt.Sprintf(`new-window -d -P -F "#{window_index}" -t %s -n %s%s`, tmuxQuote("="+sess.Name+":"), tmuxQuote(tmuxctl.UnvisName(win.Name)), cwdArg(cwd0)), "relocated")
 				}
 			}
 
