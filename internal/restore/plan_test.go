@@ -358,3 +358,31 @@ func TestBuildPlanRefusesColonSessionNames(t *testing.T) {
 		t.Errorf("warn note = %q, want it to name the session and the ':' rule", warn)
 	}
 }
+
+// TestBuildPlanRenameWindowForEncodedNames covers the version-stable
+// window-name strategy (issues #8/#10): a stored window name containing a
+// doubled backslash is vis-encoded, and only rename-window reproduces that
+// encoding on every supported tmux version (3.5a stores -n raw, next-3.8
+// encodes it) — so those windows get a follow-up rename-window with the
+// DECODED name, and plain names get none.
+func TestBuildPlanRenameWindowForEncodedNames(t *testing.T) {
+	snap := &snapshot.Snapshot{Sessions: []snapshot.Session{
+		{Name: "s", ActiveWindow: 0, Windows: []snapshot.Window{
+			{Index: 0, Name: `enc\\oded`, Layout: "L", Panes: []snapshot.Pane{{Index: 0, Cwd: "/", Restore: snapshot.Restore{Kind: "shell"}}}},
+			{Index: 1, Name: "plain", Layout: "L", Panes: []snapshot.Pane{{Index: 0, Cwd: "/", Restore: snapshot.Restore{Kind: "shell"}}}},
+		}},
+	}}
+	plan := BuildPlan(LiveState{Sessions: map[string][]LiveWindow{"seed": {{Index: 0, Name: "h"}}}}, snap, Options{})
+	renames := []string{}
+	for _, a := range plan.Actions {
+		if a.Kind == "tmux" && strings.HasPrefix(a.Args[0], "rename-window ") {
+			renames = append(renames, a.Args[0])
+		}
+	}
+	if len(renames) != 1 {
+		t.Fatalf("renames = %q, want exactly one (for the encoded name only)", renames)
+	}
+	if want := `rename-window -t "=s:0" "enc\\oded"`; renames[0] != want {
+		t.Errorf("rename = %q, want %q (decoded name, quoted)", renames[0], want)
+	}
+}
