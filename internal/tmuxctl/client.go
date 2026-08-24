@@ -6,10 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 
 	"github.com/mithro/go-tmux-saver/internal/trace"
 )
@@ -95,14 +99,48 @@ func Dial(ctx context.Context, socket, session string) (*Client, error) {
 	return c, nil
 }
 
+// socketPath returns the filesystem path of the socket tmux -L <name> uses:
+// $TMUX_TMPDIR (or /tmp) / tmux-<uid> / <name>.
+func socketPath(name string) string {
+	dir := os.Getenv("TMUX_TMPDIR")
+	if dir == "" {
+		dir = "/tmp"
+	}
+	return filepath.Join(dir, fmt.Sprintf("tmux-%d", os.Getuid()), name)
+}
+
 // noServerRunning reports whether socket has no tmux server listening at
-// all, using `has-session` (a plain, non-control client that never starts a
-// server as a side effect, unlike `-C attach-session`). msg carries tmux's
-// own diagnostic text for the failure. It returns ok=false both when a
-// server answered and when has-session failed for some other reason (e.g.
-// the server exists but session doesn't) — that case is left to the normal
-// attach-session flow below.
+// all. msg carries the diagnostic text for the failure. It returns ok=false
+// both when a server answered and when the probe failed for some other
+// reason (e.g. the server exists but session doesn't) — that case is left
+// to the normal attach-session flow below.
+//
+// Issue #6: the primary signal is the socket itself — a missing socket
+// file, or a connect refused on a stale one — because that classification
+// is errno-based and survives tmux rewording (or localising) its error
+// messages. Only when the socket state is unclassifiable (e.g. an EACCES
+// stat, some other connect errno) does it fall back to running
+// `has-session` (a plain, non-control client that never starts a server as
+// a side effect, unlike `-C attach-session`) and matching tmux's text.
 func noServerRunning(ctx context.Context, socket, session string) (msg string, ok bool) {
+	path := socketPath(socket)
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Sprintf("socket %s does not exist", path), true
+		}
+		// Unclassifiable stat failure — fall through to the text probe.
+	} else {
+		var d net.Dialer
+		conn, err := d.DialContext(ctx, "unix", path)
+		if err == nil {
+			conn.Close()
+			return "", false // a server is listening
+		}
+		if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, os.ErrNotExist) {
+			return fmt.Sprintf("stale socket %s: %v", path, err), true
+		}
+		// Unclassifiable connect failure — fall through to the text probe.
+	}
 	out, err := exec.CommandContext(ctx, "tmux", "-L", socket, "has-session", "-t", session).CombinedOutput()
 	if err == nil {
 		return "", false

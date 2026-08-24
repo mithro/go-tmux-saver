@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -107,5 +109,55 @@ func TestDialBadSession(t *testing.T) {
 	out, lerr := exec.Command("tmux", "-L", sock, "list-clients").CombinedOutput()
 	if lerr == nil && len(strings.TrimSpace(string(out))) != 0 {
 		t.Fatalf("expected no leaked tmux clients on %s, got %q", sock, out)
+	}
+}
+
+// TestNoServerClassifiesBySocketState covers issue #6: "no server" must be
+// decided from the socket itself (missing file, connection-refused stale
+// socket) rather than by matching tmux's English error text, which can
+// change between versions/locales. All three states run under a private
+// TMUX_TMPDIR so nothing touches the user's real socket directory.
+func TestNoServerClassifiesBySocketState(t *testing.T) {
+	t.Setenv("TMUX_TMPDIR", t.TempDir())
+
+	// 1. No socket file at all → no server.
+	if msg, ok := noServerRunning(context.Background(), "gts-no-such-socket", "default"); !ok {
+		t.Errorf("missing socket: ok=false msg=%q, want no-server", msg)
+	}
+
+	// 2. A stale socket file (nothing listening) → no server.
+	dir := filepath.Join(os.Getenv("TMUX_TMPDIR"), fmt.Sprintf("tmux-%d", os.Getuid()))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(dir, "gts-stale")
+	l, err := net.Listen("unix", stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.(*net.UnixListener).SetUnlinkOnClose(false)
+	l.Close()
+	if _, err := os.Stat(stale); err != nil {
+		t.Fatalf("stale socket file should remain: %v", err)
+	}
+	if msg, ok := noServerRunning(context.Background(), "gts-stale", "default"); !ok {
+		t.Errorf("stale socket: ok=false msg=%q, want no-server", msg)
+	}
+
+	// 3. A live server → NOT no-server (even though the session may or may
+	// not exist — that classification belongs to the attach flow).
+	// Started by hand rather than via StartTestServer: its test-name-derived
+	// socket name plus the TMUX_TMPDIR above would overflow the ~108-byte
+	// unix socket path limit.
+	sock := "gts-live"
+	if out, err := exec.Command("tmux", "-L", sock, "-f", "/dev/null", "new-session", "-d", "-s", "default", "-n", "h", "tail -f /dev/null").CombinedOutput(); err != nil {
+		t.Fatalf("start tmux: %v: %s", err, out)
+	}
+	t.Cleanup(func() { exec.Command("tmux", "-L", sock, "kill-server").Run() })
+	if msg, ok := noServerRunning(context.Background(), sock, "default"); ok {
+		t.Errorf("live server: ok=true msg=%q, want server-present", msg)
+	}
+	if msg, ok := noServerRunning(context.Background(), sock, "no-such-session"); ok {
+		t.Errorf("live server, missing session: ok=true msg=%q, want server-present", msg)
 	}
 }
