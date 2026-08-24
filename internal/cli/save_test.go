@@ -466,3 +466,32 @@ func TestSaveCLIChecksLockBeforeDialing(t *testing.T) {
 		t.Fatalf("events %+v, want one skipped event", ev)
 	}
 }
+
+// TestClearAlertsBodyIsLazy covers issue #9: the recovery-mail body (which
+// renders status + a 20-event tail) must only be built when a rate-limit
+// marker actually cleared — not on every fresh --check-fresh tick.
+func TestClearAlertsBodyIsLazy(t *testing.T) {
+	dataDir := t.TempDir()
+	calls := 0
+	body := func() string { calls++; return "body" }
+
+	// No markers exist → nothing clears → body never rendered.
+	if errs := clearAlertsAndNotify(dataDir, "h", "root", body, alertUnits); len(errs) != 0 {
+		t.Fatalf("errs = %v", errs)
+	}
+	if calls != 0 {
+		t.Fatalf("body rendered %d times with no markers, want 0", calls)
+	}
+
+	// With a marker present the body IS rendered (once per cleared unit);
+	// sendmail will fail in the test env, which is fine — laziness is the
+	// property under test and the render happens before the send.
+	rl := mail.RateLimiter{Dir: dataDir}
+	if !rl.ShouldSend(alertUnit, time.Now()) {
+		t.Fatal("expected first ShouldSend to create the marker")
+	}
+	clearAlertsAndNotify(dataDir, "h", "root", body, alertUnits)
+	if calls != 1 {
+		t.Fatalf("body rendered %d times with one marker, want 1", calls)
+	}
+}

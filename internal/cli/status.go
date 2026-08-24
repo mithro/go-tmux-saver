@@ -155,7 +155,7 @@ func init() {
 			if err != nil {
 				host = "unknown-host"
 			}
-			for _, err := range clearAlertsAndNotify(store.Dir, host, cfg.MailTo, alertBody(store.Dir, cfg, 20), []string{watchAlertUnit}) {
+			for _, err := range clearAlertsAndNotify(store.Dir, host, cfg.MailTo, func() string { return alertBody(store.Dir, cfg, 20) }, []string{watchAlertUnit}) {
 				fmt.Fprintln(stderr, "alert: recovery mail:", err)
 			}
 		}

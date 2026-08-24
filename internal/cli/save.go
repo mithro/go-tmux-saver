@@ -44,15 +44,22 @@ var alertUnits = []string{alertUnit, watchAlertUnit}
 // and sends exactly one recovery mail for every marker that actually
 // existed. Sending is best-effort: a sendmail failure is returned for the
 // caller to log, never turned into a non-zero exit — the operation that
-// triggered the recovery already succeeded.
-func clearAlertsAndNotify(dataDir, host, mailTo, body string, units []string) []error {
+// triggered the recovery already succeeded. body is a thunk (issue #9):
+// rendering the mail body can be expensive (status + events tail) and is
+// only needed on the rare tick where a marker actually cleared, so it runs
+// at most once and only then.
+func clearAlertsAndNotify(dataDir, host, mailTo string, body func() string, units []string) []error {
 	rl := mail.RateLimiter{Dir: dataDir}
 	var errs []error
+	rendered := ""
 	for _, u := range units {
 		if !rl.Clear(u) {
 			continue
 		}
-		if err := mail.Send(mail.Sendmail, mailTo, mail.Subject(host, u, true), body); err != nil {
+		if rendered == "" {
+			rendered = body()
+		}
+		if err := mail.Send(mail.Sendmail, mailTo, mail.Subject(host, u, true), rendered); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", u, err))
 		}
 	}
@@ -386,7 +393,7 @@ func init() {
 		fmt.Fprintln(stdout, summary)
 
 		if *auto && (o.Kind == "kept" || o.Kind == "unchanged") {
-			for _, err := range clearAlertsAndNotify(store.Dir, host, cfg.MailTo, "save succeeded: "+summary, alertUnits) {
+			for _, err := range clearAlertsAndNotify(store.Dir, host, cfg.MailTo, func() string { return "save succeeded: " + summary }, alertUnits) {
 				fmt.Fprintln(stderr, "alert: recovery mail:", err)
 			}
 		}
