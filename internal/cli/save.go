@@ -118,6 +118,12 @@ type SaveDeps struct {
 	// failed events.log append, an un-touchable fresh marker). nil logs to
 	// stderr.
 	Warn func(msg string)
+	// LockHeld, when non-nil, is the release func of a data-dir save lock
+	// the caller already holds — the save subcommand takes the lock BEFORE
+	// dialing tmux (issue #4), so a losing save never holds a live
+	// control-mode connection. RunSave then skips its own acquisition but
+	// still owns the release, so both paths behave identically.
+	LockHeld func()
 }
 
 // warn reports a non-fatal problem, defaulting to stderr when the caller
@@ -160,15 +166,20 @@ func RunSave(ctx context.Context, d SaveDeps) (Outcome, error) {
 
 	// RULING R47: one save at a time per data dir. Two concurrent saves
 	// would race over Stage/Promote, the `last` symlink and pruning; the
-	// loser skips rather than waits.
-	release, locked, err := tryLockDataDir(d.Store.Dir)
-	if err != nil {
-		logEv("error", nil, "", err.Error())
-		return Outcome{Kind: "error"}, err
-	}
-	if !locked {
-		logEv("skipped", nil, "", "save in progress")
-		return Outcome{Kind: "skipped", Duration: time.Since(start)}, nil
+	// loser skips rather than waits. The subcommand pre-acquires via
+	// LockHeld (before it dials tmux); direct callers acquire here.
+	release := d.LockHeld
+	if release == nil {
+		r, locked, err := tryLockDataDir(d.Store.Dir)
+		if err != nil {
+			logEv("error", nil, "", err.Error())
+			return Outcome{Kind: "error"}, err
+		}
+		if !locked {
+			logEv("skipped", nil, "", "save in progress")
+			return Outcome{Kind: "skipped", Duration: time.Since(start)}, nil
+		}
+		release = r
 	}
 	defer release()
 
@@ -292,6 +303,22 @@ func init() {
 			return code
 		}
 
+		// Issue #4: take the save lock BEFORE dialing tmux, so a save that
+		// is going to skip anyway (another save in progress) never opens a
+		// control-mode connection at all.
+		release, locked, err := tryLockDataDir(store.Dir)
+		if err != nil {
+			snapshot.AppendEvent(store.Dir, snapshot.Event{Time: time.Now(), Outcome: "error", Detail: err.Error()})
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		if !locked {
+			snapshot.AppendEvent(store.Dir, snapshot.Event{Time: time.Now(), Outcome: "skipped", Detail: "save in progress"})
+			fmt.Fprintln(stdout, "skipped: save in progress")
+			return 0
+		}
+		defer release()
+
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 
@@ -331,11 +358,12 @@ func init() {
 
 		d := SaveDeps{
 			T: tr, Store: store, Procs: tb,
-			Reg:     procs.ClaudeRegistry{Dir: filepath.Join(home, ".claude", "sessions")},
-			Cfg:     cfg,
-			Host:    host,
-			Clients: clients,
-			Display: func(string) {},
+			Reg:      procs.ClaudeRegistry{Dir: filepath.Join(home, ".claude", "sessions")},
+			Cfg:      cfg,
+			Host:     host,
+			Clients:  clients,
+			Display:  func(string) {},
+			LockHeld: release,
 		}
 		if !*noDisplay {
 			d.Display = func(m string) { tr.Run(ctx, displayCmd(m)) }

@@ -434,3 +434,35 @@ func TestRunSaveDanglingLastIsHardError(t *testing.T) {
 		t.Errorf("Kind = %q, want %q", o.Kind, "error")
 	}
 }
+
+// TestSaveCLIChecksLockBeforeDialing covers issue #4's save half: the lock
+// check must come BEFORE the tmux dial, so a losing save never holds a live
+// control-mode connection. Proven by pointing the config at a socket that
+// does not exist: if save dialed first it would exit 1 (no server, no
+// --auto); with the lock held it must skip cleanly without ever dialing.
+func TestSaveCLIChecksLockBeforeDialing(t *testing.T) {
+	dataDir := t.TempDir()
+	cfgPath := writeTestConfig(t, filepath.Join(t.TempDir(), "no-such-socket"))
+
+	release, ok, err := tryLockDataDir(dataDir)
+	if err != nil || !ok {
+		t.Fatalf("test lock: ok=%v err=%v", ok, err)
+	}
+	defer release()
+
+	var out, errb bytes.Buffer
+	code := Run([]string{"save", "--config", cfgPath, "--data-dir", dataDir}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	if !strings.Contains(out.String(), "skipped: save in progress") {
+		t.Fatalf("stdout = %q, want the save-in-progress skip", out.String())
+	}
+	ev, err := snapshot.TailEvents(dataDir, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ev) != 1 || ev[0].Outcome != "skipped" {
+		t.Fatalf("events %+v, want one skipped event", ev)
+	}
+}
