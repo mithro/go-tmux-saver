@@ -35,5 +35,9 @@ go.work.sum
 .worktrees/
 .superpowers/
 
-# Built binary
+# Built binary and release artefacts
 /go-tmux-saver
+/dist/
+
+# Python caches (packaging/version.py tests)
+__pycache__/
