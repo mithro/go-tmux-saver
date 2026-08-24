@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -413,5 +414,23 @@ func TestRunSaveUnreadableLastIsHardError(t *testing.T) {
 	}
 	if len(ev) != 1 || ev[0].Outcome != "error" {
 		t.Fatalf("events %+v, want one error event", ev)
+	}
+}
+
+// TestRunSaveDanglingLastIsHardError covers issue #3's save half: a `last`
+// symlink pointing at a deleted snapshot must fail the save loudly, not
+// read as "first save" (which would silently disable the unchanged-dedup
+// and the degenerate guard).
+func TestRunSaveDanglingLastIsHardError(t *testing.T) {
+	d := deps(t, saveFake())
+	if err := os.Symlink("snap-20260822T120000Z", filepath.Join(d.Store.Dir, "last")); err != nil {
+		t.Fatal(err)
+	}
+	o, err := RunSave(context.Background(), d)
+	if err == nil || !errors.Is(err, snapshot.ErrDanglingLast) {
+		t.Fatalf("RunSave = %+v err=%v; want ErrDanglingLast", o, err)
+	}
+	if o.Kind != "error" {
+		t.Errorf("Kind = %q, want %q", o.Kind, "error")
 	}
 }

@@ -1,6 +1,7 @@
 package snapshot
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -174,5 +175,78 @@ func TestRejectAndDiscardLeaveLastAlone(t *testing.T) {
 	}
 	if m, _ := filepath.Glob(filepath.Join(st.Dir, "*.tmp")); len(m) != 0 {
 		t.Fatalf("tmp dirs left: %v", m)
+	}
+}
+
+// A `last` symlink whose target directory is gone is corruption, not
+// absence: it must NOT read as os.ErrNotExist (which callers treat as the
+// normal "no snapshot yet" first-run state).
+func TestLastDanglingSymlink(t *testing.T) {
+	gz, _ := LookupCodec("gzip")
+	st := &Store{Dir: t.TempDir(), Codec: gz}
+	if err := st.EnsureDir(); err != nil {
+		t.Fatal(err)
+	}
+	stg, err := st.Stage(twoPaneSnap(time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := stg.Promote()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = st.Last()
+	if !errors.Is(err, ErrDanglingLast) {
+		t.Fatalf("dangling last err = %v, want ErrDanglingLast", err)
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		t.Fatal("dangling last must not read as os.ErrNotExist")
+	}
+
+	// Same for a half-deleted target: dir exists, layout.json gone.
+	stg2, _ := st.Stage(twoPaneSnap(time.Date(2026, 8, 22, 11, 0, 0, 0, time.UTC)), nil)
+	dir2, _ := stg2.Promote()
+	if err := os.Remove(filepath.Join(dir2, "layout.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.Last(); !errors.Is(err, ErrDanglingLast) {
+		t.Fatalf("half-deleted last err = %v, want ErrDanglingLast", err)
+	}
+}
+
+// Newest walks snap-* directories newest-first and returns the first one
+// that loads cleanly, skipping broken ones — the fallback for a dangling
+// `last`.
+func TestNewestSkipsBroken(t *testing.T) {
+	gz, _ := LookupCodec("gzip")
+	st := &Store{Dir: t.TempDir(), Codec: gz}
+	if err := st.EnsureDir(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.Newest(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("empty store Newest err = %v, want ErrNotExist", err)
+	}
+	t1 := time.Date(2026, 8, 22, 10, 0, 0, 0, time.UTC)
+	stg1, _ := st.Stage(twoPaneSnap(t1), nil)
+	dir1, _ := stg1.Promote()
+	stg2, _ := st.Stage(twoPaneSnap(t1.Add(10*time.Minute)), nil)
+	dir2, _ := stg2.Promote()
+	// Break the newest (remove its layout.json); Newest must fall back to dir1.
+	if err := os.Remove(filepath.Join(dir2, "layout.json")); err != nil {
+		t.Fatal(err)
+	}
+	snap, dir, err := st.Newest()
+	if err != nil || dir != dir1 || snap == nil {
+		t.Fatalf("Newest = %v %s %v, want %s", snap, dir, err, dir1)
+	}
+	// A leftover staging dir must never win.
+	if err := os.MkdirAll(filepath.Join(st.Dir, "snap-20991231T235959Z.tmp"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, dir, _ := st.Newest(); dir != dir1 {
+		t.Fatalf("Newest picked %s, want %s (tmp dirs excluded)", dir, dir1)
 	}
 }

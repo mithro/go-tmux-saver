@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const dirTimeFormat = "20060102T150405Z"
@@ -202,7 +203,16 @@ func (st *Staged) Reject() (string, error) {
 
 func (st *Staged) Discard() error { return os.RemoveAll(st.tmpDir) }
 
-// Last returns the snapshot `last` points at. os.ErrNotExist if none.
+// ErrDanglingLast means the `last` symlink exists but its target snapshot
+// is gone or half-deleted. That is store corruption, not the normal "no
+// snapshot yet" first-run state — so it deliberately does NOT match
+// os.ErrNotExist, which callers (save's guard, restore --on-start) treat as
+// benign absence and would otherwise silently skip on.
+var ErrDanglingLast = errors.New("dangling last symlink")
+
+// Last returns the snapshot `last` points at. os.ErrNotExist if there is no
+// `last` symlink at all; ErrDanglingLast if the symlink exists but its
+// target does not load.
 func (s *Store) Last() (*Snapshot, string, error) {
 	target, err := os.Readlink(filepath.Join(s.Dir, "last"))
 	if err != nil {
@@ -210,7 +220,32 @@ func (s *Store) Last() (*Snapshot, string, error) {
 	}
 	dir := filepath.Join(s.Dir, target)
 	snap, err := s.Load(dir)
+	if err != nil && errors.Is(err, os.ErrNotExist) {
+		return nil, dir, fmt.Errorf("last -> %s: %w", target, ErrDanglingLast)
+	}
 	return snap, dir, err
+}
+
+// Newest walks the store's snap-* directories newest-first (their names are
+// UTC timestamps, so lexical order is time order) and returns the first one
+// that loads cleanly — the recovery fallback when `last` is dangling.
+// Staging (.tmp) and rejected directories are never candidates.
+// os.ErrNotExist if no intact snapshot exists.
+func (s *Store) Newest() (*Snapshot, string, error) {
+	dirs, err := filepath.Glob(filepath.Join(s.Dir, "snap-*"))
+	if err != nil {
+		return nil, "", err
+	}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		dir := dirs[i]
+		if strings.HasSuffix(dir, ".tmp") {
+			continue
+		}
+		if snap, err := s.Load(dir); err == nil {
+			return snap, dir, nil
+		}
+	}
+	return nil, "", fmt.Errorf("no intact snapshot in %s: %w", s.Dir, os.ErrNotExist)
 }
 
 func (s *Store) Load(dir string) (*Snapshot, error) {
