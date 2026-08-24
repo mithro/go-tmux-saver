@@ -272,3 +272,31 @@ func TestImportResurrectPromoteLogsEventAndTouchesFresh(t *testing.T) {
 		t.Error("a promoting import must touch the freshness marker so status isn't instantly STALE")
 	}
 }
+
+// TestImportResurrectCLIRefusesWhileSaveLockHeld covers issue #4: the
+// import stages into the store (where a concurrent save's stale-tmp sweep
+// could delete its staging dir mid-write) and --promote moves `last`, so
+// the whole command must fail fast while the data-dir lock is held —
+// regardless of --promote.
+func TestImportResurrectCLIRefusesWhileSaveLockHeld(t *testing.T) {
+	dataDir := t.TempDir()
+	cfgPath := writeConfig(t, `{}`)
+
+	release, ok, err := tryLockDataDir(dataDir)
+	if err != nil || !ok {
+		t.Fatalf("test lock: ok=%v err=%v", ok, err)
+	}
+	defer release()
+
+	for _, extra := range [][]string{nil, {"--promote=false"}} {
+		args := append([]string{"import-resurrect", resurrectFixture, "--config", cfgPath, "--data-dir", dataDir}, extra...)
+		var out, errb bytes.Buffer
+		code := Run(args, &out, &errb)
+		if code != 1 {
+			t.Fatalf("%v: exit %d, want 1; stdout=%q stderr=%q", extra, code, out.String(), errb.String())
+		}
+		if !strings.Contains(errb.String(), "lock") {
+			t.Errorf("%v: stderr = %q, want a lock-held message", extra, errb.String())
+		}
+	}
+}

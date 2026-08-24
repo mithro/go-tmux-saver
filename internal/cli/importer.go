@@ -135,6 +135,16 @@ func init() {
 			return code
 		}
 
+		// The import stages into the store even without --promote (and a
+		// concurrent save's stale-tmp sweep would delete that staging dir
+		// mid-write), so the whole run holds the data-dir save lock
+		// (issue #4), not just the promotion.
+		release, ok := lockOrFail(store.Dir, stderr)
+		if !ok {
+			return 1
+		}
+		defer release()
+
 		return RunImportResurrect(stdout, stderr, store, savePath, *contents, expandHome(cfg.ClaudeResumePath), *promote, *strict)
 	}})
 }

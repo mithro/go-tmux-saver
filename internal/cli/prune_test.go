@@ -73,3 +73,34 @@ func TestPruneCLINothingToPrune(t *testing.T) {
 		t.Fatalf("stdout = %q, want %q", out.String(), "nothing to prune")
 	}
 }
+
+// TestPruneCLIRefusesWhileSaveLockHeld covers issue #4: prune deletes
+// snapshot directories, so it must fail fast while a save (or other
+// maintenance command) holds the data-dir lock — never race the save's
+// hardlink pass. --dry-run stays read-only and keeps working.
+func TestPruneCLIRefusesWhileSaveLockHeld(t *testing.T) {
+	dataDir := t.TempDir()
+	cfgPath := writeConfig(t, `{}`)
+
+	release, ok, err := tryLockDataDir(dataDir)
+	if err != nil || !ok {
+		t.Fatalf("test lock: ok=%v err=%v", ok, err)
+	}
+	defer release()
+
+	var out, errb bytes.Buffer
+	code := Run([]string{"prune", "--config", cfgPath, "--data-dir", dataDir}, &out, &errb)
+	if code != 1 {
+		t.Fatalf("exit %d, want 1; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	if !strings.Contains(errb.String(), "lock") {
+		t.Errorf("stderr = %q, want a lock-held message", errb.String())
+	}
+
+	out.Reset()
+	errb.Reset()
+	code = Run([]string{"prune", "--dry-run", "--config", cfgPath, "--data-dir", dataDir}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("dry-run under lock exit %d, want 0 (read-only); stderr=%q", code, errb.String())
+	}
+}
