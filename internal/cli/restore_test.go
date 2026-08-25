@@ -376,3 +376,121 @@ func TestRestoreSummaryOnStartPartialExitsZero(t *testing.T) {
 		t.Errorf("--merge exit code = %d, want 1", mergeCode)
 	}
 }
+
+// TestRunRestoreDanglingLastFallsBackToNewest covers issue #3: a `last`
+// symlink whose target was deleted is corruption, not "no snapshot" — the
+// restore must fall back to the newest intact snapshot LOUDLY (an "error"
+// event + a note) instead of silently skipping under --on-start.
+func TestRunRestoreDanglingLastFallsBackToNewest(t *testing.T) {
+	dataDir := t.TempDir()
+	gz, _ := snapshot.LookupCodec("gzip")
+	store := &snapshot.Store{Dir: dataDir, Codec: gz}
+	if err := store.EnsureDir(); err != nil {
+		t.Fatal(err)
+	}
+	mkSnap := func(ts time.Time) string {
+		snap := &snapshot.Snapshot{Schema: snapshot.SchemaVersion, TakenAt: ts,
+			Sessions: []snapshot.Session{
+				{Name: "extra", ActiveWindow: 0, Windows: []snapshot.Window{
+					{Index: 0, Name: "w", Layout: "L1", Panes: []snapshot.Pane{
+						{Index: 0, Cwd: "/", Restore: snapshot.Restore{Kind: "shell"}},
+					}},
+				}},
+			}}
+		stg, err := store.Stage(snap, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dir, err := stg.Promote()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	intact := mkSnap(time.Date(2026, 8, 24, 10, 0, 0, 0, time.UTC))
+	gone := mkSnap(time.Date(2026, 8, 24, 11, 0, 0, 0, time.UTC))
+	if err := os.RemoveAll(gone); err != nil {
+		t.Fatal(err) // `last` now dangles at the removed snapshot
+	}
+
+	f := &tmuxctl.Fake{
+		Replies: map[string][]string{
+			`list-windows -a -F "#{session_name}\t#{window_index}\t#{window_name}\t#{session_grouped}"`: {"default\t0\th\t0"},
+			`list-clients -F "#{client_name}"`: {},
+		},
+		Default: []string{},
+	}
+	cfg := config.Default()
+	cfg.SeedSession = "default"
+	cfg.SeedWindow = "h"
+	cfg.Contents.Enabled = false
+
+	o, err := RunRestore(context.Background(), RestoreDeps{
+		T: f, Store: store, Cfg: cfg, OnStart: true,
+		PrepareReplayDir: func() (string, error) { return t.TempDir(), nil },
+	})
+	if err != nil {
+		t.Fatalf("RunRestore: %v", err)
+	}
+	if o.Kind != "restored" {
+		t.Fatalf("Kind = %q, want restored (fallback to %s)", o.Kind, intact)
+	}
+	foundNote := false
+	for _, n := range o.Notes {
+		if strings.Contains(n, "dangling") {
+			foundNote = true
+		}
+	}
+	if !foundNote {
+		t.Errorf("Notes = %q, want a dangling-last fallback note", o.Notes)
+	}
+	ev, err := snapshot.TailEvents(dataDir, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sawError, sawRestore := false, false
+	for _, e := range ev {
+		if e.Outcome == "error" && strings.Contains(e.Detail, "dangling") {
+			sawError = true
+		}
+		if e.Outcome == "restore" {
+			sawRestore = true
+		}
+	}
+	if !sawError || !sawRestore {
+		t.Fatalf("events %+v, want an error(dangling) event AND a restore event", ev)
+	}
+}
+
+// ...and when there is nothing intact to fall back to, the dangling last is
+// a hard error even under --on-start (never a silent skip).
+func TestRunRestoreDanglingLastNoFallbackErrors(t *testing.T) {
+	dataDir := t.TempDir()
+	gz, _ := snapshot.LookupCodec("gzip")
+	store := &snapshot.Store{Dir: dataDir, Codec: gz}
+	if err := store.EnsureDir(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("snap-20260824T110000Z", filepath.Join(dataDir, "last")); err != nil {
+		t.Fatal(err)
+	}
+	f := &tmuxctl.Fake{
+		Replies: map[string][]string{
+			`list-windows -a -F "#{session_name}\t#{window_index}\t#{window_name}\t#{session_grouped}"`: {"default\t0\th\t0"},
+			`list-clients -F "#{client_name}"`: {},
+		},
+		Default: []string{},
+	}
+	cfg := config.Default()
+	cfg.SeedSession = "default"
+	cfg.SeedWindow = "h"
+	cfg.Contents.Enabled = false
+
+	_, err := RunRestore(context.Background(), RestoreDeps{
+		T: f, Store: store, Cfg: cfg, OnStart: true,
+		PrepareReplayDir: func() (string, error) { return t.TempDir(), nil },
+	})
+	if err == nil || !strings.Contains(err.Error(), "dangling") {
+		t.Fatalf("err = %v, want a dangling-last hard error", err)
+	}
+}

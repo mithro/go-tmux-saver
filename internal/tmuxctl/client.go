@@ -6,10 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 
 	"github.com/mithro/go-tmux-saver/internal/trace"
 )
@@ -23,6 +27,12 @@ type Client struct {
 	parseErr chan error
 	mu       sync.Mutex
 	desynced atomic.Bool
+	// parseOnce/finalParseErr capture the read loop's one-shot exit error
+	// the first time the closed replies channel is observed, so every later
+	// next() call can keep reporting it without blocking on the
+	// already-drained parseErr channel (issue #7).
+	parseOnce     sync.Once
+	finalParseErr error
 }
 
 var _ Transport = (*Client)(nil)
@@ -95,14 +105,48 @@ func Dial(ctx context.Context, socket, session string) (*Client, error) {
 	return c, nil
 }
 
+// socketPath returns the filesystem path of the socket tmux -L <name> uses:
+// $TMUX_TMPDIR (or /tmp) / tmux-<uid> / <name>.
+func socketPath(name string) string {
+	dir := os.Getenv("TMUX_TMPDIR")
+	if dir == "" {
+		dir = "/tmp"
+	}
+	return filepath.Join(dir, fmt.Sprintf("tmux-%d", os.Getuid()), name)
+}
+
 // noServerRunning reports whether socket has no tmux server listening at
-// all, using `has-session` (a plain, non-control client that never starts a
-// server as a side effect, unlike `-C attach-session`). msg carries tmux's
-// own diagnostic text for the failure. It returns ok=false both when a
-// server answered and when has-session failed for some other reason (e.g.
-// the server exists but session doesn't) — that case is left to the normal
-// attach-session flow below.
+// all. msg carries the diagnostic text for the failure. It returns ok=false
+// both when a server answered and when the probe failed for some other
+// reason (e.g. the server exists but session doesn't) — that case is left
+// to the normal attach-session flow below.
+//
+// Issue #6: the primary signal is the socket itself — a missing socket
+// file, or a connect refused on a stale one — because that classification
+// is errno-based and survives tmux rewording (or localising) its error
+// messages. Only when the socket state is unclassifiable (e.g. an EACCES
+// stat, some other connect errno) does it fall back to running
+// `has-session` (a plain, non-control client that never starts a server as
+// a side effect, unlike `-C attach-session`) and matching tmux's text.
 func noServerRunning(ctx context.Context, socket, session string) (msg string, ok bool) {
+	path := socketPath(socket)
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Sprintf("socket %s does not exist", path), true
+		}
+		// Unclassifiable stat failure — fall through to the text probe.
+	} else {
+		var d net.Dialer
+		conn, err := d.DialContext(ctx, "unix", path)
+		if err == nil {
+			conn.Close()
+			return "", false // a server is listening
+		}
+		if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, os.ErrNotExist) {
+			return fmt.Sprintf("stale socket %s: %v", path, err), true
+		}
+		// Unclassifiable connect failure — fall through to the text probe.
+	}
 	out, err := exec.CommandContext(ctx, "tmux", "-L", socket, "has-session", "-t", session).CombinedOutput()
 	if err == nil {
 		return "", false
@@ -118,6 +162,15 @@ func (c *Client) next(ctx context.Context) (Reply, error) {
 	select {
 	case r, ok := <-c.replies:
 		if !ok {
+			// The read loop has exited — surface WHY (issue #7): an EOF
+			// inside an open %begin block is a very different failure from
+			// a clean close, and a bare "control connection closed" hid
+			// that detail. The goroutine sends its result before closing
+			// replies, so this receive never blocks.
+			c.parseOnce.Do(func() { c.finalParseErr = <-c.parseErr })
+			if c.finalParseErr != nil {
+				return Reply{}, fmt.Errorf("control connection closed: %w", c.finalParseErr)
+			}
 			return Reply{}, fmt.Errorf("control connection closed")
 		}
 		return r, nil

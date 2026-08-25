@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -413,5 +414,84 @@ func TestRunSaveUnreadableLastIsHardError(t *testing.T) {
 	}
 	if len(ev) != 1 || ev[0].Outcome != "error" {
 		t.Fatalf("events %+v, want one error event", ev)
+	}
+}
+
+// TestRunSaveDanglingLastIsHardError covers issue #3's save half: a `last`
+// symlink pointing at a deleted snapshot must fail the save loudly, not
+// read as "first save" (which would silently disable the unchanged-dedup
+// and the degenerate guard).
+func TestRunSaveDanglingLastIsHardError(t *testing.T) {
+	d := deps(t, saveFake())
+	if err := os.Symlink("snap-20260822T120000Z", filepath.Join(d.Store.Dir, "last")); err != nil {
+		t.Fatal(err)
+	}
+	o, err := RunSave(context.Background(), d)
+	if err == nil || !errors.Is(err, snapshot.ErrDanglingLast) {
+		t.Fatalf("RunSave = %+v err=%v; want ErrDanglingLast", o, err)
+	}
+	if o.Kind != "error" {
+		t.Errorf("Kind = %q, want %q", o.Kind, "error")
+	}
+}
+
+// TestSaveCLIChecksLockBeforeDialing covers issue #4's save half: the lock
+// check must come BEFORE the tmux dial, so a losing save never holds a live
+// control-mode connection. Proven by pointing the config at a socket that
+// does not exist: if save dialed first it would exit 1 (no server, no
+// --auto); with the lock held it must skip cleanly without ever dialing.
+func TestSaveCLIChecksLockBeforeDialing(t *testing.T) {
+	dataDir := t.TempDir()
+	cfgPath := writeTestConfig(t, filepath.Join(t.TempDir(), "no-such-socket"))
+
+	release, ok, err := tryLockDataDir(dataDir)
+	if err != nil || !ok {
+		t.Fatalf("test lock: ok=%v err=%v", ok, err)
+	}
+	defer release()
+
+	var out, errb bytes.Buffer
+	code := Run([]string{"save", "--config", cfgPath, "--data-dir", dataDir}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	if !strings.Contains(out.String(), "skipped: save in progress") {
+		t.Fatalf("stdout = %q, want the save-in-progress skip", out.String())
+	}
+	ev, err := snapshot.TailEvents(dataDir, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ev) != 1 || ev[0].Outcome != "skipped" {
+		t.Fatalf("events %+v, want one skipped event", ev)
+	}
+}
+
+// TestClearAlertsBodyIsLazy covers issue #9: the recovery-mail body (which
+// renders status + a 20-event tail) must only be built when a rate-limit
+// marker actually cleared — not on every fresh --check-fresh tick.
+func TestClearAlertsBodyIsLazy(t *testing.T) {
+	dataDir := t.TempDir()
+	calls := 0
+	body := func() string { calls++; return "body" }
+
+	// No markers exist → nothing clears → body never rendered.
+	if errs := clearAlertsAndNotify(dataDir, "h", "root", body, alertUnits); len(errs) != 0 {
+		t.Fatalf("errs = %v", errs)
+	}
+	if calls != 0 {
+		t.Fatalf("body rendered %d times with no markers, want 0", calls)
+	}
+
+	// With a marker present the body IS rendered (once per cleared unit);
+	// sendmail will fail in the test env, which is fine — laziness is the
+	// property under test and the render happens before the send.
+	rl := mail.RateLimiter{Dir: dataDir}
+	if !rl.ShouldSend(alertUnit, time.Now()) {
+		t.Fatal("expected first ShouldSend to create the marker")
+	}
+	clearAlertsAndNotify(dataDir, "h", "root", body, alertUnits)
+	if calls != 1 {
+		t.Fatalf("body rendered %d times with one marker, want 1", calls)
 	}
 }

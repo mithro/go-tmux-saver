@@ -40,14 +40,15 @@ type statusReport struct {
 	Stale      bool          `json:"stale"`
 	Events     []statusEvent `json:"events"`
 	Snapshots  int           `json:"snapshots"`
+	Warnings   []string      `json:"warnings,omitempty"`
 }
 
 // countSnapshots counts dataDir's snap-* subdirectories, excluding any
 // still-staging snap-*.tmp ones.
-func countSnapshots(dataDir string) int {
+func countSnapshots(dataDir string) (int, error) {
 	entries, err := os.ReadDir(dataDir)
 	if err != nil {
-		return 0
+		return 0, err
 	}
 	n := 0
 	for _, e := range entries {
@@ -56,7 +57,7 @@ func countSnapshots(dataDir string) int {
 			n++
 		}
 	}
-	return n
+	return n, nil
 }
 
 // RunStatus prints go-tmux-saver's operational status to w: the last good
@@ -67,7 +68,17 @@ func countSnapshots(dataDir string) int {
 // staleness into a non-zero exit code (1) and, in text mode, an additional
 // "STALE: ..." line.
 func RunStatus(w io.Writer, dataDir string, cfg config.Config, asJSON, checkFresh bool, n int, now time.Time) int {
-	lastGood, ok, _ := snapshot.LastGood(dataDir)
+	// Issue #8: read failures must be VISIBLE — an unreadable events.log or
+	// data dir silently reporting "no events" / "0 snapshots" looks exactly
+	// like a healthy-but-idle install. They accumulate as warnings (text
+	// lines / a JSON field) rather than changing the exit code: staleness
+	// is the health signal, and an unreadable fresh marker already reads
+	// as stale.
+	var warnings []string
+	lastGood, ok, lgErr := snapshot.LastGood(dataDir)
+	if lgErr != nil {
+		warnings = append(warnings, "fresh marker unreadable: "+lgErr.Error())
+	}
 	limit := time.Duration(cfg.IntervalMinutes*cfg.WatchStaleFactor) * time.Minute
 	var age time.Duration
 	if ok {
@@ -75,8 +86,14 @@ func RunStatus(w io.Writer, dataDir string, cfg config.Config, asJSON, checkFres
 	}
 	stale := !ok || age > limit
 
-	events, _ := snapshot.TailEvents(dataDir, n)
-	snapshots := countSnapshots(dataDir)
+	events, evErr := snapshot.TailEvents(dataDir, n)
+	if evErr != nil {
+		warnings = append(warnings, "events.log unreadable: "+evErr.Error())
+	}
+	snapshots, snErr := countSnapshots(dataDir)
+	if snErr != nil {
+		warnings = append(warnings, "snapshot count unavailable (data dir unlistable): "+snErr.Error())
+	}
 
 	if asJSON {
 		je := make([]statusEvent, len(events))
@@ -87,7 +104,7 @@ func RunStatus(w io.Writer, dataDir string, cfg config.Config, asJSON, checkFres
 				DurationMS: e.DurationMS, File: e.File, Detail: e.Detail,
 			}
 		}
-		rep := statusReport{Stale: stale, Events: je, Snapshots: snapshots}
+		rep := statusReport{Stale: stale, Events: je, Snapshots: snapshots, Warnings: warnings}
 		if ok {
 			rep.LastGood = lastGood.UTC().Format(time.RFC3339)
 			rep.AgeSeconds = int64(age.Seconds())
@@ -95,6 +112,9 @@ func RunStatus(w io.Writer, dataDir string, cfg config.Config, asJSON, checkFres
 		b, _ := json.Marshal(rep)
 		fmt.Fprintln(w, string(b))
 	} else {
+		for _, warn := range warnings {
+			fmt.Fprintln(w, "warning:", warn)
+		}
 		if ok {
 			fmt.Fprintf(w, "last good save: %s (%s ago)\n", lastGood.UTC().Format(time.RFC3339), age.Round(time.Second))
 		} else {
@@ -155,7 +175,7 @@ func init() {
 			if err != nil {
 				host = "unknown-host"
 			}
-			for _, err := range clearAlertsAndNotify(store.Dir, host, cfg.MailTo, alertBody(store.Dir, cfg, 20), []string{watchAlertUnit}) {
+			for _, err := range clearAlertsAndNotify(store.Dir, host, cfg.MailTo, func() string { return alertBody(store.Dir, cfg, 20) }, []string{watchAlertUnit}) {
 				fmt.Fprintln(stderr, "alert: recovery mail:", err)
 			}
 		}

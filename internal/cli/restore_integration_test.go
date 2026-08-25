@@ -128,3 +128,83 @@ func TestSaveRestoreRoundTrip(t *testing.T) {
 		t.Fatalf("tail should have been relaunched in net:0.0, got %q", cmd)
 	}
 }
+
+// TestSaveRestoreRoundTripHostileNames covers the issue-#8 gap: the C1
+// quoting fix (tmuxctl.Quote on every data-derived argument) is exercised
+// against a REAL tmux server with names containing double quotes,
+// backslashes, spaces, semicolons and a dot — the probe-confirmed
+// injection/mangling characters. (':' is deliberately absent: sessions
+// with ':' in the name are unaddressable and refused — issue #5.)
+//
+// The assertions compare against the names tmux actually STORED, not the
+// argv we passed: probe-verified (3.5a and next-3.8) that tmux's CLI argv
+// path doubles backslashes at creation time (new-session -s 'a\b' stores
+// a\\b — has-session confirms), while -F output and control-mode command
+// parsing are verbatim. The property under test is round-trip fidelity of
+// the stored server state, whatever its spelling.
+func TestSaveRestoreRoundTripHostileNames(t *testing.T) {
+	sock := tmuxctl.StartTestServer(t)
+	sess := `q"uo\te.s;s`
+	win := `w"in\d ; x`
+	run := func(args ...string) {
+		if out, err := exec.Command("tmux", append([]string{"-L", sock}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("tmux %v: %v: %s", args, err, out)
+		}
+	}
+	listWindows := func() string {
+		out, _ := exec.Command("tmux", "-L", sock, "list-windows", "-a", "-F", "#{session_name}:#{window_index} #{window_name} #{window_panes}").Output()
+		return string(out)
+	}
+
+	run("new-session", "-d", "-s", sess, "-n", win, "-c", "/tmp")
+	// Find the hostile session's id and its STORED window line (see the doc
+	// comment: the stored spelling can differ from the argv spelling).
+	out, err := exec.Command("tmux", "-L", sock, "list-sessions", "-F", "#{session_id}\t#{session_name}").Output()
+	if err != nil {
+		t.Fatalf("list-sessions: %v", err)
+	}
+	sid := ""
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if id, name, ok := strings.Cut(line, "\t"); ok && name != "default" {
+			sid = id
+		}
+	}
+	if sid == "" {
+		t.Fatalf("hostile session not found in list-sessions output: %q", out)
+	}
+	run("split-window", "-d", "-t", sid+":0")
+
+	want := ""
+	waitFor(t, 5*time.Second, func() (bool, string) {
+		for _, line := range strings.Split(strings.TrimSpace(listWindows()), "\n") {
+			if !strings.HasPrefix(line, "default:") && strings.HasSuffix(line, " 2") {
+				want = line
+				return true, ""
+			}
+		}
+		return false, listWindows()
+	})
+	if !strings.ContainsAny(want, `"\;.`) {
+		t.Fatalf("stored window line lost its hostile characters: %q", want)
+	}
+
+	dataDir := t.TempDir()
+	cfgFile := writeTestConfig(t, sock)
+	t.Setenv("XDG_DATA_HOME", dataDir)
+	if code := Run([]string{"save", "--config", cfgFile, "--no-display"}, io.Discard, os.Stderr); code != 0 {
+		t.Fatal("save failed")
+	}
+	run("kill-session", "-t", sid)
+	if code := Run([]string{"restore", "--on-start", "--config", cfgFile}, io.Discard, os.Stderr); code != 0 {
+		t.Fatal("restore failed")
+	}
+	waitFor(t, 5*time.Second, func() (bool, string) {
+		got := listWindows()
+		return strings.Contains(got, want), got
+	})
+	// The seed must have survived untouched — a quoting break here would
+	// have let the hostile name execute as extra tmux commands (C1).
+	if got := listWindows(); !strings.Contains(got, "default:0 h") {
+		t.Fatalf("seed window damaged:\n%s", got)
+	}
+}

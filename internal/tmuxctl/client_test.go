@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -107,5 +109,86 @@ func TestDialBadSession(t *testing.T) {
 	out, lerr := exec.Command("tmux", "-L", sock, "list-clients").CombinedOutput()
 	if lerr == nil && len(strings.TrimSpace(string(out))) != 0 {
 		t.Fatalf("expected no leaked tmux clients on %s, got %q", sock, out)
+	}
+}
+
+// TestNoServerClassifiesBySocketState covers issue #6: "no server" must be
+// decided from the socket itself (missing file, connection-refused stale
+// socket) rather than by matching tmux's English error text, which can
+// change between versions/locales. All three states run under a private
+// TMUX_TMPDIR so nothing touches the user's real socket directory.
+func TestNoServerClassifiesBySocketState(t *testing.T) {
+	t.Setenv("TMUX_TMPDIR", t.TempDir())
+
+	// 1. No socket file at all → no server.
+	if msg, ok := noServerRunning(context.Background(), "gts-no-such-socket", "default"); !ok {
+		t.Errorf("missing socket: ok=false msg=%q, want no-server", msg)
+	}
+
+	// 2. A stale socket file (nothing listening) → no server.
+	dir := filepath.Join(os.Getenv("TMUX_TMPDIR"), fmt.Sprintf("tmux-%d", os.Getuid()))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(dir, "gts-stale")
+	l, err := net.Listen("unix", stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.(*net.UnixListener).SetUnlinkOnClose(false)
+	l.Close()
+	if _, err := os.Stat(stale); err != nil {
+		t.Fatalf("stale socket file should remain: %v", err)
+	}
+	if msg, ok := noServerRunning(context.Background(), "gts-stale", "default"); !ok {
+		t.Errorf("stale socket: ok=false msg=%q, want no-server", msg)
+	}
+
+	// 3. A live server → NOT no-server (even though the session may or may
+	// not exist — that classification belongs to the attach flow).
+	// Started by hand rather than via StartTestServer: its test-name-derived
+	// socket name plus the TMUX_TMPDIR above would overflow the ~108-byte
+	// unix socket path limit.
+	sock := "gts-live"
+	if out, err := exec.Command("tmux", "-L", sock, "-f", "/dev/null", "new-session", "-d", "-s", "default", "-n", "h", "tail -f /dev/null").CombinedOutput(); err != nil {
+		t.Fatalf("start tmux: %v: %s", err, out)
+	}
+	t.Cleanup(func() { exec.Command("tmux", "-L", sock, "kill-server").Run() })
+	if msg, ok := noServerRunning(context.Background(), sock, "default"); ok {
+		t.Errorf("live server: ok=true msg=%q, want server-present", msg)
+	}
+	if msg, ok := noServerRunning(context.Background(), sock, "no-such-session"); ok {
+		t.Errorf("live server, missing session: ok=true msg=%q, want server-present", msg)
+	}
+}
+
+// TestNextSurfacesParseErrDetail covers issue #7's diagnostics half: when
+// the control stream dies inside an open %begin block, the error must carry
+// ParseReplies' detail ("ended inside block N"), not just a generic
+// "control connection closed" — and repeated calls must keep returning it
+// without blocking (the one-shot parseErr channel is captured once).
+func TestNextSurfacesParseErrDetail(t *testing.T) {
+	c := &Client{replies: make(chan Reply, 4), parseErr: make(chan error, 1)}
+	r := strings.NewReader("%begin 1 7 0\npartial output\n") // EOF mid-block
+	go func() {
+		c.parseErr <- ParseReplies(r, c.replies)
+		close(c.replies)
+	}()
+	for i := 0; i < 2; i++ {
+		_, err := c.next(context.Background())
+		if err == nil || !strings.Contains(err.Error(), "ended inside block 7") {
+			t.Fatalf("call %d: err = %v, want the ended-inside-block detail", i, err)
+		}
+	}
+
+	// A clean close (%exit) keeps the plain message, with no wrapped nil.
+	c2 := &Client{replies: make(chan Reply, 4), parseErr: make(chan error, 1)}
+	go func() {
+		c2.parseErr <- ParseReplies(strings.NewReader("%exit\n"), c2.replies)
+		close(c2.replies)
+	}()
+	_, err := c2.next(context.Background())
+	if err == nil || err.Error() != "control connection closed" {
+		t.Fatalf("clean close err = %v, want plain control-connection-closed", err)
 	}
 }

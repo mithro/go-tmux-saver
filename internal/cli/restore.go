@@ -87,11 +87,29 @@ func RunRestore(ctx context.Context, d RestoreDeps) (RestoreOutcome, error) {
 
 	var snap *snapshot.Snapshot
 	var lastDir string
+	var extraNotes []string
 	if d.SnapshotDir != "" {
 		lastDir = d.SnapshotDir
 		snap, err = d.Store.Load(lastDir)
 	} else {
 		snap, lastDir, err = d.Store.Last()
+		if errors.Is(err, snapshot.ErrDanglingLast) {
+			// Issue #3: a dangling `last` is store corruption, not absence.
+			// Recover from the newest intact snapshot — LOUDLY (an "error"
+			// event plus a note on the outcome), never as a silent skip.
+			danglingErr := err
+			snapshot.AppendEvent(d.Store.Dir, snapshot.Event{
+				Time: time.Now(), Outcome: "error", Clients: live.Clients,
+				Detail: "restore: " + danglingErr.Error() + " — falling back to newest intact snapshot",
+			})
+			var ferr error
+			snap, lastDir, ferr = d.Store.Newest()
+			if ferr != nil {
+				return RestoreOutcome{}, fmt.Errorf("%w; no intact snapshot to fall back to: %v", danglingErr, ferr)
+			}
+			extraNotes = append(extraNotes, fmt.Sprintf("dangling last symlink — fell back to %s", filepath.Base(lastDir)))
+			err = nil
+		}
 	}
 	if err != nil {
 		// RULING R45: at boot the tmux-server.service drop-in runs
@@ -154,7 +172,7 @@ func RunRestore(ctx context.Context, d RestoreDeps) (RestoreOutcome, error) {
 
 	report, err := restore.Apply(ctx, d.T, plan, contentsFn, replayDir)
 	if err != nil {
-		return RestoreOutcome{Notes: report.Notes}, err
+		return RestoreOutcome{Notes: append(extraNotes, report.Notes...)}, err
 	}
 
 	windows := report.Created + report.Relocated + report.Skipped
@@ -162,7 +180,7 @@ func RunRestore(ctx context.Context, d RestoreDeps) (RestoreOutcome, error) {
 	o := RestoreOutcome{
 		Kind: "restored", Sessions: len(snap.Sessions), Windows: windows,
 		Relocated: report.Relocated, Skipped: report.Skipped, Errors: plannedWindows - windows,
-		Notes: report.Notes, Duration: time.Since(start),
+		Notes: append(extraNotes, report.Notes...), Duration: time.Since(start),
 	}
 
 	detail := fmt.Sprintf("sessions=%d windows=%d relocated=%d skipped=%d errors=%d", o.Sessions, o.Windows, o.Relocated, o.Skipped, o.Errors)

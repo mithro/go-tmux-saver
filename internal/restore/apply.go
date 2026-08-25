@@ -87,6 +87,13 @@ func Apply(ctx context.Context, t tmuxctl.Transport, p Plan, contents func(paneK
 		case "note":
 			report.Skipped++
 
+		case "warn":
+			// A loud skip (e.g. a whole session refused for an
+			// unaddressable name, issue #5): the message must reach the
+			// user via Report.Notes; the per-window Skipped counting is
+			// carried by the "note" actions that accompany it.
+			report.Notes = append(report.Notes, a.Note)
+
 		case "tmux":
 			cmd := a.Args[0]
 			sessionCreate := strings.HasPrefix(cmd, "new-session ")

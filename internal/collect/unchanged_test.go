@@ -37,3 +37,19 @@ func TestUnchanged(t *testing.T) {
 		t.Fatal("extra window is a change")
 	}
 }
+
+// TestUnchangedAsymmetricClaudeTitle covers the issue-#8 gap from Task 10:
+// when only ONE side has a ✳ Claude summary title (Claude started or
+// exited between saves, the other side showing a plain shell title), that
+// transition is state and must count as a change — in both directions.
+func TestUnchangedAsymmetricClaudeTitle(t *testing.T) {
+	a, b := base(), base()
+	a.Sessions[0].Windows[0].Panes[0].Title = "tim@ten64: ~"
+	b.Sessions[0].Windows[0].Panes[0].Title = "✳ fixing dns"
+	if Unchanged(a, b) {
+		t.Fatal("shell → ✳ transition is a change")
+	}
+	if Unchanged(b, a) {
+		t.Fatal("✳ → shell transition is a change")
+	}
+}

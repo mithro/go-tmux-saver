@@ -57,6 +57,12 @@ func (p *Plan) note(session, msg string) {
 	p.Actions = append(p.Actions, Action{Kind: "note", Note: msg, Session: session})
 }
 
+// warn records a message the applier must surface in Report.Notes (unlike
+// the count-only "note" kind) — used for whole-session refusals (issue #5).
+func (p *Plan) warn(session, msg string) {
+	p.Actions = append(p.Actions, Action{Kind: "warn", Note: msg, Session: session})
+}
+
 func (p *Plan) contents(session, paneTarget, paneKey string) {
 	p.Actions = append(p.Actions, Action{Kind: "contents", Args: []string{paneTarget, paneKey}, Session: session})
 }
@@ -152,6 +158,21 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 	var plan Plan
 
 	for _, sess := range snap.Sessions {
+		// Issue #5, probe-verified on tmux 3.5a: a session name containing
+		// ':' cannot be addressed by ANY target spelling — "a:b:1" parses as
+		// window "b:1", and the exact-match form "=a:b:1" as session "a" —
+		// so every post-creation action would fail. Refuse the whole
+		// session loudly rather than half-restore it. ('.' names are fine:
+		// the full "sess:idx" form splits at the colon first.)
+		if strings.Contains(sess.Name, ":") {
+			plan.warn(sess.Name, fmt.Sprintf("session %q skipped: tmux targets cannot address a session name containing ':' (%d windows not restored)", sess.Name, len(sess.Windows)))
+			for range sess.Windows {
+				plan.Skipped++
+				plan.note(sess.Name, "skipped: unaddressable session name")
+			}
+			continue
+		}
+
 		liveWins, sessExists := live.Sessions[sess.Name]
 		liveByIdx := map[int]string{}
 		for _, lw := range liveWins {
@@ -166,15 +187,24 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 			cwd0 := firstCwd(win.Panes)
 
 			switch {
+			// Name encoding (probe-verified, 3.5a vs next-3.8): tmux
+			// vis(3)-encodes SESSION names at creation on both versions, so
+			// the -s VALUE is decoded (tmuxctl.UnvisName) and tmux's own
+			// re-encoding reproduces the snapshot's stored spelling. WINDOW
+			// -n values store raw on 3.5a but encoded on next-3.8 — the one
+			// version-stable primitive is rename-window (encodes on both),
+			// so names containing a backslash get a follow-up rename-window
+			// below and -n stays verbatim. -t TARGETS always use the stored
+			// spelling — target matching compares it verbatim.
 			case sessionCreated && i == 0:
-				target = fmt.Sprintf("%s:%d", sess.Name, win.Index)
+				target = fmt.Sprintf("=%s:%d", sess.Name, win.Index)
 				created = true
-				plan.tmux(sess.Name, fmt.Sprintf("new-session -d -s %s -n %s%s", tmuxQuote(sess.Name), tmuxQuote(win.Name), cwdArg(cwd0)), "")
+				plan.tmux(sess.Name, fmt.Sprintf("new-session -d -s %s -n %s%s", tmuxQuote(tmuxctl.UnvisName(sess.Name)), tmuxQuote(win.Name), cwdArg(cwd0)), "")
 			default:
 				liveName, occ := liveByIdx[win.Index]
 				switch {
 				case !occ:
-					target = fmt.Sprintf("%s:%d", sess.Name, win.Index)
+					target = fmt.Sprintf("=%s:%d", sess.Name, win.Index)
 					created = true
 					plan.tmux(sess.Name, fmt.Sprintf("new-window -d -t %s -n %s%s", tmuxQuote(target), tmuxQuote(win.Name), cwdArg(cwd0)), "")
 				case liveName == win.Name:
@@ -191,13 +221,22 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 						plan.note(sess.Name, fmt.Sprintf("present at index %d", idx))
 						continue
 					}
-					target = fmt.Sprintf("%s:%s", sess.Name, WinPlaceholder)
+					target = fmt.Sprintf("=%s:%s", sess.Name, WinPlaceholder)
 					created = true
 					relocated = true
-					plan.tmux(sess.Name, fmt.Sprintf(`new-window -d -P -F "#{window_index}" -t %s -n %s%s`, tmuxQuote(sess.Name+":"), tmuxQuote(win.Name), cwdArg(cwd0)), "relocated")
+					plan.tmux(sess.Name, fmt.Sprintf(`new-window -d -P -F "#{window_index}" -t %s -n %s%s`, tmuxQuote("="+sess.Name+":"), tmuxQuote(win.Name), cwdArg(cwd0)), "relocated")
 				}
 			}
 
+			if created && strings.Contains(win.Name, `\\`) {
+				// See the name-encoding comment above: a DOUBLED backslash
+				// marks a vis-encoded stored name, and only rename-window
+				// reproduces that encoding on every supported tmux version.
+				// (A lone backslash is a raw-stored 3.5a-era name: -n
+				// verbatim is exact there, and no command can store it on an
+				// encoding version, so no rename is emitted for those.)
+				plan.tmux(sess.Name, fmt.Sprintf("rename-window -t %s %s", tmuxQuote(target), tmuxQuote(tmuxctl.UnvisName(win.Name))), "")
+			}
 			for k := 1; k < len(win.Panes); k++ {
 				plan.tmux(sess.Name, fmt.Sprintf("split-window -d -t %s%s", tmuxQuote(target), cwdArg(cwdOrHome(win.Panes[k].Cwd))), "")
 			}

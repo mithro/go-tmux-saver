@@ -47,3 +47,61 @@ func Quote(s string) string {
 	b.WriteByte('"')
 	return b.String()
 }
+
+// UnvisName reverses the vis(3) encoding tmux applies to session and
+// window names at creation time (session_check_name → utf8_stravis with
+// VIS_OCTAL|VIS_CSTYLE|VIS_TAB|VIS_NL): stored names carry `\` doubled and
+// control characters rendered as \t, \n, \ooo, … — probe-verified on tmux
+// 3.5a and next-3.8 (`new-session -s 'a\b'` stores a\\b; has-session
+// confirms the stored spelling). Handing a stored name back to
+// `new-session -s` / `new-window -n` verbatim would re-encode it (\\ →
+// \\\\), so restore decodes first; tmux's own re-encoding then reproduces
+// the stored spelling exactly. Raw backslashes are always doubled by the
+// encoder, so every backslash in a stored name begins an escape — an
+// unrecognised escape is preserved literally as the safe fallback.
+func UnvisName(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c != '\\' || i == len(s)-1 {
+			b.WriteByte(c)
+			continue
+		}
+		i++
+		switch n := s[i]; {
+		case n == '\\':
+			b.WriteByte('\\')
+		case n == 'n':
+			b.WriteByte('\n')
+		case n == 't':
+			b.WriteByte('\t')
+		case n == 'r':
+			b.WriteByte('\r')
+		case n == 'a':
+			b.WriteByte('\a')
+		case n == 'b':
+			b.WriteByte('\b')
+		case n == 'f':
+			b.WriteByte('\f')
+		case n == 'v':
+			b.WriteByte('\v')
+		case n == 's':
+			b.WriteByte(' ')
+		case n >= '0' && n <= '7':
+			v, j := 0, 0
+			for ; j < 3 && i+j < len(s) && s[i+j] >= '0' && s[i+j] <= '7'; j++ {
+				v = v*8 + int(s[i+j]-'0')
+			}
+			i += j - 1
+			b.WriteByte(byte(v))
+		default:
+			b.WriteByte('\\')
+			b.WriteByte(n)
+		}
+	}
+	return b.String()
+}

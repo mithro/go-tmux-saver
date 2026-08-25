@@ -26,7 +26,7 @@ func TestApplyRelocationAndContentsReplay(t *testing.T) {
 
 	f := &tmuxctl.Fake{
 		Replies: map[string][]string{
-			`new-window -d -P -F "#{window_index}" -t "default:" -n "rcfiles" -c "/tmp"`: {"7"},
+			`new-window -d -P -F "#{window_index}" -t "=default:" -n "rcfiles" -c "/tmp"`: {"7"},
 		},
 		Default: []string{},
 	}
@@ -51,10 +51,10 @@ func TestApplyRelocationAndContentsReplay(t *testing.T) {
 	}
 
 	calls := strings.Join(f.Calls, "\n")
-	if !strings.Contains(calls, `send-keys -t "default:7.0" "'/home/tim/bin/claude-resume' 'abc'" Enter`) {
+	if !strings.Contains(calls, `send-keys -t "=default:7.0" "'/home/tim/bin/claude-resume' 'abc'" Enter`) {
 		t.Errorf("placeholder not substituted in send-keys:\n%s", calls)
 	}
-	if !strings.Contains(calls, `select-layout -t "default:7" "L1"`) {
+	if !strings.Contains(calls, `select-layout -t "=default:7" "L1"`) {
 		t.Errorf("placeholder not substituted in select-layout:\n%s", calls)
 	}
 	if strings.Contains(calls, WinPlaceholder) {
@@ -65,7 +65,7 @@ func TestApplyRelocationAndContentsReplay(t *testing.T) {
 	}
 
 	wantFile := filepath.Join(replayDir, netPaneKey+".txt")
-	wantCmd := fmt.Sprintf("send-keys -t %s %s Enter", tmuxQuote("net:0.0"), tmuxQuote(" cat "+shellQuote([]string{wantFile})))
+	wantCmd := fmt.Sprintf("send-keys -t %s %s Enter", tmuxQuote("=net:0.0"), tmuxQuote(" cat "+shellQuote([]string{wantFile})))
 	if !strings.Contains(calls, wantCmd) {
 		t.Errorf("expected cat-replay send-keys %q, got:\n%s", wantCmd, calls)
 	}
@@ -113,7 +113,7 @@ func TestApplyCreationFailureAbortsOnlyThatBlock(t *testing.T) {
 	live := LiveState{Sessions: map[string][]LiveWindow{"default": {{0, "h"}, {1, "tmux-restore"}}}}
 	p := BuildPlan(live, snapNet(), Options{SeedSession: "default", SeedWindow: "h"})
 
-	relocCmd := `new-window -d -P -F "#{window_index}" -t "default:" -n "rcfiles" -c "/tmp"`
+	relocCmd := `new-window -d -P -F "#{window_index}" -t "=default:" -n "rcfiles" -c "/tmp"`
 	f := &failOnce{Fake: &tmuxctl.Fake{Default: []string{}}, failCmd: relocCmd}
 
 	report, err := Apply(context.Background(), f, p, func(string) ([]byte, bool) { return nil, false }, t.TempDir())
@@ -128,7 +128,7 @@ func TestApplyCreationFailureAbortsOnlyThatBlock(t *testing.T) {
 	if !strings.Contains(calls, `new-session -d -s "net" -n "swcfg" -c "/"`) {
 		t.Errorf("unrelated session creation should still run:\n%s", calls)
 	}
-	if !strings.Contains(calls, `select-window -t "net:0"`) {
+	if !strings.Contains(calls, `select-window -t "=net:0"`) {
 		t.Errorf("unrelated window's own actions should still run:\n%s", calls)
 	}
 
@@ -162,7 +162,7 @@ func TestApplyPlainNewWindowFailureAbortsBlock(t *testing.T) {
 	live := LiveState{Sessions: map[string][]LiveWindow{"default": {{0, "h"}}}}
 	p := BuildPlan(live, snapNet(), Options{SeedSession: "default", SeedWindow: "h"})
 
-	failCmd := `new-window -d -t "default:1" -n "rcfiles" -c "/tmp"`
+	failCmd := `new-window -d -t "=default:1" -n "rcfiles" -c "/tmp"`
 	f := &failOnce{Fake: &tmuxctl.Fake{Default: []string{}}, failCmd: failCmd}
 
 	report, err := Apply(context.Background(), f, p, func(string) ([]byte, bool) { return nil, false }, t.TempDir())
@@ -276,7 +276,7 @@ func TestApplyContextCancelledStopsAndReturnsErr(t *testing.T) {
 // a space) must be created with EXACTLY that name and must not execute the
 // `b c` fragment as a second tmux command. The pre-fix planner emitted
 // `new-window ... -n a;b c ...`, which tmux split at the ';' — a saved name
-// of `evil;kill-window -t default:0` actually killed a live window.
+// of `evil;kill-window -t default.0` actually killed a live window.
 func TestApplyLiveServerHostileWindowName(t *testing.T) {
 	sock := tmuxctl.StartTestServer(t) // session "default", window 0 named "h"
 	ctx := context.Background()

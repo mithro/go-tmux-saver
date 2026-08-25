@@ -317,10 +317,14 @@ branches, always-suggest-update-branch, tag ruleset enforcing `vXX.ZZZ`.
 ## 8. Testing
 
 - The control-mode transport is an interface; unit tests use a fake backed by
-  **recorded transcripts** from real servers (tmux next-3.8; a 3.5a transcript
-  is a pre-rollout TODO for big-storage in Plan 2 — until then 3.5a support is
-  by construction, not by test) as golden
-  files, so parsing is tested against both versions without tmux in the loop.
+  **recorded transcripts** from real servers as golden files, so parsing is
+  tested against both versions without tmux in the loop. DONE 2026-08-24
+  (issue #10): `internal/tmuxctl/testdata/transcript-3.5a.txt` is a raw
+  control-mode stream recorded on big-storage's stock tmux 3.5a, driving the
+  exact wire commands Dial/collect/restore send against a synthetic layout;
+  `TestParseRepliesTmux35aTranscript` replays it. The recording also exposed
+  a 3.5a↔next-3.8 name-encoding split (window `-n` raw vs vis-encoded),
+  fixed version-stably via `rename-window` (see internal/restore/plan.go).
 - Table-tested pure cores: guard decision (ported from
   `resurrect-post-save.is_degenerate`), `/proc` tree resolution on fixture
   trees incl. stale-pid registry entries, Claude registry cross-checks, the

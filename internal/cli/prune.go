@@ -59,6 +59,16 @@ func init() {
 			return code
 		}
 
+		// A real prune deletes snapshot directories, so it must hold the
+		// data-dir save lock (issue #4); --dry-run is read-only and exempt.
+		if !*dryRun {
+			release, ok := lockOrFail(store.Dir, stderr)
+			if !ok {
+				return 1
+			}
+			defer release()
+		}
+
 		return RunPrune(stdout, store.Dir, cfg, *dryRun, time.Now())
 	}})
 }

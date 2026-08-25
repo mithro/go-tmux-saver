@@ -239,3 +239,114 @@ func TestStatusCheckFreshClearsWatchMarker(t *testing.T) {
 		t.Fatalf("sendmail calls after a second fresh run = %d, want still 1", s.count())
 	}
 }
+
+// TestRunStatusStaleTextExact pins the exact STALE line format (issue #8:
+// previously untested) — the watch alert and humans both read it.
+func TestRunStatusStaleTextExact(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := snapshot.TouchFresh(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	backdated := now.Add(-2 * time.Hour)
+	if err := os.Chtimes(filepath.Join(dataDir, "fresh"), backdated, backdated); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default() // interval 10m × factor 3 = 30m limit
+	var buf bytes.Buffer
+	rc := RunStatus(&buf, dataDir, cfg, false, true, 5, now)
+	if rc != 1 {
+		t.Fatalf("rc = %d, want 1", rc)
+	}
+	if !strings.Contains(buf.String(), "STALE: last good save 2h0m0s ago (limit 30m0s)\n") {
+		t.Fatalf("output = %q, want the exact STALE line", buf.String())
+	}
+}
+
+// TestRunStatusJSONCheckFreshStale covers the --json --check-fresh stale
+// combo (issue #8): exit 1 with machine-parseable output — stale:true in
+// the JSON, and no human STALE line mixed into the stream.
+func TestRunStatusJSONCheckFreshStale(t *testing.T) {
+	dataDir := t.TempDir() // no fresh marker at all → stale
+	var buf bytes.Buffer
+	rc := RunStatus(&buf, dataDir, config.Default(), true, true, 5, time.Now())
+	if rc != 1 {
+		t.Fatalf("rc = %d, want 1", rc)
+	}
+	var rep struct {
+		Stale bool `json:"stale"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &rep); err != nil {
+		t.Fatalf("output not clean JSON: %v\n%s", err, buf.String())
+	}
+	if !rep.Stale {
+		t.Fatal("stale = false, want true")
+	}
+	if strings.Contains(buf.String(), "STALE:") {
+		t.Fatalf("human STALE line leaked into JSON output: %s", buf.String())
+	}
+}
+
+// TestRunStatusAgeEqualsLimitIsFresh pins the boundary (issue #8): an age
+// exactly equal to the limit is still fresh — staleness requires age >
+// limit, so a save landing exactly on the boundary doesn't flap the alert.
+func TestRunStatusAgeEqualsLimitIsFresh(t *testing.T) {
+	dataDir := t.TempDir()
+	if err := snapshot.TouchFresh(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	limit := time.Duration(cfg.IntervalMinutes*cfg.WatchStaleFactor) * time.Minute
+	now := time.Now()
+	exact := now.Add(-limit)
+	if err := os.Chtimes(filepath.Join(dataDir, "fresh"), exact, exact); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if rc := RunStatus(&buf, dataDir, cfg, false, true, 5, now); rc != 0 {
+		t.Fatalf("rc = %d, want 0 (age == limit is fresh)\n%s", rc, buf.String())
+	}
+}
+
+// TestRunStatusSurfacesReadErrors covers issue #8's swallowed-error item:
+// an unreadable events.log and an unlistable data dir must produce visible
+// warnings (and a JSON warnings field), not silently report "no events" /
+// "0 snapshots".
+func TestRunStatusSurfacesReadErrors(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("permission-based test is meaningless as root")
+	}
+	dataDir := t.TempDir()
+	// events.log as a DIRECTORY → open succeeds, read fails (EISDIR).
+	if err := os.MkdirAll(filepath.Join(dataDir, "events.log"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Write-and-traverse-only data dir → ReadDir (snapshot count) fails,
+	// while path traversal to fresh/events.log still works.
+	if err := os.Chmod(dataDir, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dataDir, 0o700) })
+
+	var buf bytes.Buffer
+	RunStatus(&buf, dataDir, config.Default(), false, false, 5, time.Now())
+	out := buf.String()
+	if !strings.Contains(out, "warning:") || !strings.Contains(out, "events.log") {
+		t.Errorf("text output lacks an events.log warning:\n%s", out)
+	}
+	if !strings.Contains(out, "snapshot") && !strings.Contains(out, "data dir") {
+		t.Errorf("text output lacks a data-dir/snapshot warning:\n%s", out)
+	}
+
+	buf.Reset()
+	RunStatus(&buf, dataDir, config.Default(), true, false, 5, time.Now())
+	var rep struct {
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &rep); err != nil {
+		t.Fatalf("json: %v\n%s", err, buf.String())
+	}
+	if len(rep.Warnings) == 0 {
+		t.Fatalf("JSON warnings empty, want the read errors surfaced:\n%s", buf.String())
+	}
+}

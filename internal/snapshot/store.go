@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const dirTimeFormat = "20060102T150405Z"
@@ -180,7 +181,33 @@ func writeJSONAtomic(path string, v any) (err error) {
 	return os.Rename(part, path)
 }
 
+// fsyncDir fsyncs directory dir, making renames/creates inside it durable
+// on disk. File CONTENTS are fsynced at write time (writeCompressed /
+// writeJSONAtomic); without the directory fsync a crash+reboot could lose
+// the directory ENTRIES those writes created (issue #7).
+func fsyncDir(dir string) error {
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	err = d.Sync()
+	if cerr := d.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
 func (st *Staged) Promote() (string, error) {
+	// Issue #7: make the staged tree's directory entries durable before it
+	// is renamed into place, and the renames themselves durable after —
+	// `last` must never survive a crash pointing at a snapshot whose
+	// entries were lost.
+	if err := fsyncDir(filepath.Join(st.tmpDir, "panes")); err != nil {
+		return "", err
+	}
+	if err := fsyncDir(st.tmpDir); err != nil {
+		return "", err
+	}
 	final := filepath.Join(st.store.Dir, st.name)
 	if err := os.Rename(st.tmpDir, final); err != nil {
 		return "", err
@@ -191,18 +218,34 @@ func (st *Staged) Promote() (string, error) {
 	if err := os.Symlink(st.name, tmpLink); err != nil {
 		return "", err
 	}
-	return final, os.Rename(tmpLink, link)
+	if err := os.Rename(tmpLink, link); err != nil {
+		return "", err
+	}
+	// One fsync of the store dir covers both renames (snapshot dir + last).
+	return final, fsyncDir(st.store.Dir)
 }
 
 func (st *Staged) Reject() (string, error) {
 	dst := filepath.Join(st.store.Dir, "rejected", st.name)
 	os.RemoveAll(dst)
-	return dst, os.Rename(st.tmpDir, dst)
+	if err := os.Rename(st.tmpDir, dst); err != nil {
+		return dst, err
+	}
+	return dst, fsyncDir(filepath.Dir(dst))
 }
 
 func (st *Staged) Discard() error { return os.RemoveAll(st.tmpDir) }
 
-// Last returns the snapshot `last` points at. os.ErrNotExist if none.
+// ErrDanglingLast means the `last` symlink exists but its target snapshot
+// is gone or half-deleted. That is store corruption, not the normal "no
+// snapshot yet" first-run state — so it deliberately does NOT match
+// os.ErrNotExist, which callers (save's guard, restore --on-start) treat as
+// benign absence and would otherwise silently skip on.
+var ErrDanglingLast = errors.New("dangling last symlink")
+
+// Last returns the snapshot `last` points at. os.ErrNotExist if there is no
+// `last` symlink at all; ErrDanglingLast if the symlink exists but its
+// target does not load.
 func (s *Store) Last() (*Snapshot, string, error) {
 	target, err := os.Readlink(filepath.Join(s.Dir, "last"))
 	if err != nil {
@@ -210,7 +253,32 @@ func (s *Store) Last() (*Snapshot, string, error) {
 	}
 	dir := filepath.Join(s.Dir, target)
 	snap, err := s.Load(dir)
+	if err != nil && errors.Is(err, os.ErrNotExist) {
+		return nil, dir, fmt.Errorf("last -> %s: %w", target, ErrDanglingLast)
+	}
 	return snap, dir, err
+}
+
+// Newest walks the store's snap-* directories newest-first (their names are
+// UTC timestamps, so lexical order is time order) and returns the first one
+// that loads cleanly — the recovery fallback when `last` is dangling.
+// Staging (.tmp) and rejected directories are never candidates.
+// os.ErrNotExist if no intact snapshot exists.
+func (s *Store) Newest() (*Snapshot, string, error) {
+	dirs, err := filepath.Glob(filepath.Join(s.Dir, "snap-*"))
+	if err != nil {
+		return nil, "", err
+	}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		dir := dirs[i]
+		if strings.HasSuffix(dir, ".tmp") {
+			continue
+		}
+		if snap, err := s.Load(dir); err == nil {
+			return snap, dir, nil
+		}
+	}
+	return nil, "", fmt.Errorf("no intact snapshot in %s: %w", s.Dir, os.ErrNotExist)
 }
 
 func (s *Store) Load(dir string) (*Snapshot, error) {

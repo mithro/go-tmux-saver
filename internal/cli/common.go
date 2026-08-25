@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	"github.com/mithro/go-tmux-saver/internal/config"
@@ -96,4 +97,25 @@ func countClients(ctx context.Context, t tmuxctl.Transport) int {
 		}
 	}
 	return n - 1 // exclude ourselves (the control client)
+}
+
+// lockOrFail takes the data-dir save lock for a maintenance command that
+// mutates the store (prune, import-resurrect) — issue #4: prune deletes
+// snapshot directories a concurrent save may be hardlinking against, and
+// an import's staging directory would be swept by that save's stale-tmp
+// cleanup. Unlike the periodic save's skip-until-next-tick, these are
+// one-shot commands run by a human or a script, so a held lock is a hard
+// "try again" failure (ok=false, message already printed) rather than a
+// silent skip.
+func lockOrFail(dir string, stderr io.Writer) (release func(), ok bool) {
+	release, locked, err := tryLockDataDir(dir)
+	if err != nil {
+		fmt.Fprintln(stderr, "data-dir lock:", err)
+		return nil, false
+	}
+	if !locked {
+		fmt.Fprintln(stderr, "data-dir lock held (a save or another maintenance command is running) — try again shortly")
+		return nil, false
+	}
+	return release, true
 }
