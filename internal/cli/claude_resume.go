@@ -15,10 +15,15 @@ import (
 	"github.com/mithro/go-tmux-saver/internal/resume"
 )
 
-// execveFn is syscall.Exec, swappable in tests: on success it never returns
-// (the placeholder becomes the claude process, so the pane's process tree —
-// and the next save's /proc resolution — see a real `claude`).
-var execveFn = syscall.Exec
+// execveFn/lookPathFn are syscall.Exec and exec.LookPath, swappable in
+// tests (CI has no `claude` on PATH, and a test must never really exec):
+// on success execveFn never returns — the placeholder becomes the claude
+// process, so the pane's process tree, and the next save's /proc
+// resolution, see a real `claude`.
+var (
+	execveFn   = syscall.Exec
+	lookPathFn = exec.LookPath
+)
 
 // isTTY reports whether f is a terminal (the placeholder styles its banner
 // and waits for a keypress only when a human is on the other end). Decided
@@ -76,7 +81,7 @@ func init() {
 				fmt.Fprintln(stderr, "claude-resume: chdir:", err)
 			}
 		}
-		path, err := exec.LookPath(d.Argv[0])
+		path, err := lookPathFn(d.Argv[0])
 		if err != nil {
 			fmt.Fprintln(stderr, "claude-resume: `claude` not found on PATH")
 			return 127

@@ -15,7 +15,8 @@ func TestClaudeResumeCLIExecsClaude(t *testing.T) {
 		got = argv
 		return nil
 	}
-	t.Cleanup(func() { execveFn = nil }) // no test may exec for real
+	lookPathFn = func(name string) (string, error) { return "/stub/" + name, nil }
+	t.Cleanup(func() { execveFn, lookPathFn = nil, nil }) // no test may exec for real
 
 	sid := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 	var out, errb bytes.Buffer
@@ -38,7 +39,8 @@ func TestClaudeResumeCLIJunkSidPicker(t *testing.T) {
 		got = argv
 		return nil
 	}
-	t.Cleanup(func() { execveFn = nil })
+	lookPathFn = func(name string) (string, error) { return "/stub/" + name, nil }
+	t.Cleanup(func() { execveFn, lookPathFn = nil, nil })
 
 	var out, errb bytes.Buffer
 	if code := Run([]string{"claude-resume", "junk"}, &out, &errb); code != 0 {
