@@ -180,7 +180,40 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 		}
 		sessionCreated := !sessExists
 
+		// Relocations run AFTER every fixed-index creation in the session:
+		// a relocating new-window takes tmux's next-free index at apply
+		// time, so emitted earlier it could steal an index a later saved
+		// window owns (seen live on ten64: seed h at 0 forced saved bash:0
+		// to relocate, tmux picked index 1, and tmux-restore:1 then failed
+		// "index 1 in use"). willRelocate mirrors the decision switch in
+		// the loop body — side-effect free.
+		willRelocate := func(i int, win snapshot.Window) bool {
+			if sessionCreated && i == 0 {
+				return false
+			}
+			liveName, occ := liveByIdx[win.Index]
+			if !occ || liveName == win.Name {
+				return false
+			}
+			if _, ok := findWindowByName(liveWins, win.Name); ok {
+				return false
+			}
+			return true
+		}
+		var order []int
 		for i, win := range sess.Windows {
+			if !willRelocate(i, win) {
+				order = append(order, i)
+			}
+		}
+		for i, win := range sess.Windows {
+			if willRelocate(i, win) {
+				order = append(order, i)
+			}
+		}
+
+		for _, i := range order {
+			win := sess.Windows[i]
 			var target string
 			var relocated bool
 			created := false

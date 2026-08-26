@@ -105,3 +105,24 @@ func UnvisName(s string) string {
 	}
 	return b.String()
 }
+
+// CanonicalMember picks the one session of a tmux session group that
+// snapshots and live-state queries keep (issue #12): every member of a
+// group reports session_grouped=1 — there is no "original" flagged 0 — so
+// skipping grouped sessions outright drops the whole group. The canonical
+// member is the one whose name equals the group name (tmux names groups
+// after the session they were created from), falling back to the lexically
+// smallest member so the choice stays deterministic when that session is
+// gone. members must be non-empty.
+func CanonicalMember(group string, members []string) string {
+	best := ""
+	for _, m := range members {
+		if m == group {
+			return m
+		}
+		if best == "" || m < best {
+			best = m
+		}
+	}
+	return best
+}

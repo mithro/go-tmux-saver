@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	SessCmd = "list-sessions -F \"#{session_name}\t#{session_grouped}\t#{session_attached}\""
+	SessCmd = "list-sessions -F \"#{session_name}\t#{session_group}\t#{session_grouped}\t#{session_attached}\""
 	WinCmd  = "list-windows -a -F \"#{session_name}\t#{window_index}\t#{window_name}\t#{window_active}\t#{window_flags}\t#{window_layout}\t#{automatic-rename}\""
 	PaneCmd = "list-panes -a -F \"#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_active}\t#{pane_pid}\t#{pane_current_path}\t#{pane_title}\t#{history_size}\""
 	// ServerCmd's third field is the name of OUR OWN client — the control
@@ -117,20 +117,38 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 	if err != nil {
 		return nil, nil, warnings, fmt.Errorf("list-sessions: %w", err)
 	}
-	sessions := map[string]*snapshot.Session{}
-	var order []string
+	// Pass 1: parse every session row. Issue #12: EVERY member of a tmux
+	// session group reports session_grouped=1 (there is no "original"
+	// flagged 0), so skipping grouped rows outright dropped whole groups —
+	// on ten64, the entire `default` group. Instead, group members are
+	// bucketed by #{session_group} and exactly one canonical member per
+	// group survives (tmuxctl.CanonicalMember).
+	type sessRow struct{ name, group, grouped string }
+	var rows []sessRow
+	groups := map[string][]string{}
 	for _, l := range sessLines {
-		// session_name \t session_grouped \t session_attached
-		name, tail, ok := splitTail(l, 2)
+		// session_name \t session_group \t session_grouped \t session_attached
+		name, tail, ok := splitTail(l, 3)
 		if !ok {
 			return nil, nil, warnings, fmt.Errorf("malformed list-sessions line: %q", l)
 		}
-		grouped := tail[0]
-		if grouped == "1" {
-			continue // grouped clone
+		rows = append(rows, sessRow{name: name, group: tail[0], grouped: tail[1]})
+		if tail[1] == "1" {
+			groups[tail[0]] = append(groups[tail[0]], name)
 		}
-		sessions[name] = &snapshot.Session{Name: name}
-		order = append(order, name)
+	}
+	canonical := map[string]string{}
+	for g, members := range groups {
+		canonical[g] = tmuxctl.CanonicalMember(g, members)
+	}
+	sessions := map[string]*snapshot.Session{}
+	var order []string
+	for _, r := range rows {
+		if r.grouped == "1" && r.name != canonical[r.group] {
+			continue // non-canonical group member: same windows, skip
+		}
+		sessions[r.name] = &snapshot.Session{Name: r.name}
+		order = append(order, r.name)
 	}
 	sort.Strings(order)
 

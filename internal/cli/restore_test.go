@@ -260,7 +260,7 @@ func TestRunRestoreCountsErrorsFromFailedCreate(t *testing.T) {
 	f := &failingTransport{
 		Fake: &tmuxctl.Fake{
 			Replies: map[string][]string{
-				`list-windows -a -F "#{session_name}\t#{window_index}\t#{window_name}\t#{session_grouped}"`: {"default\t0\th\t0"},
+				`list-windows -a -F "#{session_name}\t#{window_index}\t#{window_name}\t#{session_grouped}\t#{session_group}"`: {"default\t0\th\t0\t"},
 				`list-clients -F "#{client_name}"`: {},
 			},
 			Default: []string{},
@@ -415,7 +415,7 @@ func TestRunRestoreDanglingLastFallsBackToNewest(t *testing.T) {
 
 	f := &tmuxctl.Fake{
 		Replies: map[string][]string{
-			`list-windows -a -F "#{session_name}\t#{window_index}\t#{window_name}\t#{session_grouped}"`: {"default\t0\th\t0"},
+			`list-windows -a -F "#{session_name}\t#{window_index}\t#{window_name}\t#{session_grouped}\t#{session_group}"`: {"default\t0\th\t0\t"},
 			`list-clients -F "#{client_name}"`: {},
 		},
 		Default: []string{},
@@ -476,7 +476,7 @@ func TestRunRestoreDanglingLastNoFallbackErrors(t *testing.T) {
 	}
 	f := &tmuxctl.Fake{
 		Replies: map[string][]string{
-			`list-windows -a -F "#{session_name}\t#{window_index}\t#{window_name}\t#{session_grouped}"`: {"default\t0\th\t0"},
+			`list-windows -a -F "#{session_name}\t#{window_index}\t#{window_name}\t#{session_grouped}\t#{session_group}"`: {"default\t0\th\t0\t"},
 			`list-clients -F "#{client_name}"`: {},
 		},
 		Default: []string{},

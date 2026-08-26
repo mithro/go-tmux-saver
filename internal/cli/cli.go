@@ -34,10 +34,20 @@ func usage(w io.Writer) {
 }
 
 // Run dispatches args[0] to a registered subcommand and returns the exit code.
+// The conventional flag spellings people type first are accepted as aliases:
+// --version/-v for the version subcommand, and --help/-h/help for usage
+// (printed to stdout with exit 0 — asking for help is not an error).
 func Run(args []string, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		usage(stderr)
 		return 2
+	}
+	switch args[0] {
+	case "--version", "-v":
+		args = append([]string{"version"}, args[1:]...)
+	case "--help", "-h", "help":
+		usage(stdout)
+		return 0
 	}
 	for _, c := range commands {
 		if c.name == args[0] {

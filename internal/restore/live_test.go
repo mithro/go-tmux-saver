@@ -18,9 +18,11 @@ import (
 func TestQueryLive(t *testing.T) {
 	fake := &tmuxctl.Fake{Replies: map[string][]string{
 		liveWinCmd: {
-			"default\t0\th\t0",
-			"default-1\t0\th\t1",         // grouped clone (session_grouped=1): must be excluded
-			"net\t3\tname\twith\ttab\t0", // window name itself contains tabs; parsed right-to-left
+			// Both group members carry session_grouped=1 (issue #12 — tmux
+			// flags no "original"); the canonical member "default" survives.
+			"default\t0\th\t1\tdefault",
+			"default-1\t0\th\t1\tdefault",  // non-canonical member: excluded
+			"net\t3\tname\twith\ttab\t0\t", // window name itself contains tabs; parsed right-to-left
 		},
 		liveClientsCmd: {"/dev/pts/1", "/dev/pts/2"},
 	}}
@@ -49,7 +51,7 @@ func TestQueryLive(t *testing.T) {
 
 func TestQueryLiveSeedOnly(t *testing.T) {
 	fake := &tmuxctl.Fake{Replies: map[string][]string{
-		liveWinCmd:     {"default\t0\th\t0"},
+		liveWinCmd:     {"default\t0\th\t0\t"},
 		liveClientsCmd: {},
 	}}
 
@@ -68,5 +70,42 @@ func TestQueryLiveMalformedLine(t *testing.T) {
 	}}
 	if _, err := QueryLive(context.Background(), fake); err == nil {
 		t.Fatal("expected an error for a malformed list-windows line")
+	}
+}
+
+// TestQueryLiveKeepsOneGroupedMember covers issue #12's restore half, with
+// rows shaped like the real ten64 state: every member of a session group has
+// session_grouped=1, so the old skip-all-grouped rule made the whole group
+// invisible in LiveState — a manual restore would then plan to recreate
+// windows that already exist live. One canonical member per group must
+// survive (name == group when present, else lexically smallest).
+func TestQueryLiveKeepsOneGroupedMember(t *testing.T) {
+	fake := &tmuxctl.Fake{Replies: map[string][]string{
+		liveWinCmd: {
+			"default\t0\th\t1\tdefault",
+			"default\t1\ttmux-restore\t1\tdefault",
+			"default-36\t0\th\t1\tdefault",
+			"default-36\t1\ttmux-restore\t1\tdefault",
+			"orphan-2\t0\tw\t1\torphan",
+			"orphan-9\t0\tw\t1\torphan",
+			"net\t3\tswcfg\t0\t",
+		},
+		liveClientsCmd: {},
+	}}
+	live, err := QueryLive(context.Background(), fake)
+	if err != nil {
+		t.Fatalf("QueryLive: %v", err)
+	}
+	if len(live.Sessions) != 3 {
+		t.Fatalf("sessions = %+v, want default+orphan-2+net", live.Sessions)
+	}
+	if got := live.Sessions["default"]; len(got) != 2 || got[1].Name != "tmux-restore" {
+		t.Errorf("default windows = %+v, want the group's windows once", got)
+	}
+	if _, ok := live.Sessions["orphan-2"]; !ok {
+		t.Errorf("orphan-2 (lexically smallest member) should survive: %+v", live.Sessions)
+	}
+	if _, ok := live.Sessions["default-36"]; ok {
+		t.Errorf("clone default-36 must be excluded: %+v", live.Sessions)
 	}
 }
