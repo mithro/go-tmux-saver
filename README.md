@@ -67,6 +67,25 @@ split. Off by default; normal output is unchanged.
   go-tmux-saver restore --merge      # default: restore additively into whatever is live now
   ```
 
+  **Previewing and test restores.** Two ways to see what a restore would do
+  without risking the real server:
+  ```sh
+  # Print the exact planned tmux commands, replays and skips — nothing runs:
+  go-tmux-saver restore --dry-run
+
+  # Full test restore into a DISPOSABLE tmux server on a separate socket
+  # (started automatically with -f /dev/null, so none of your tmux config,
+  # plugins or hooks run there; the configured socket is never touched):
+  go-tmux-saver restore --sandbox try1
+  tmux -L try1 attach        # inspect the restored layout, scrollback, panes
+  tmux -L try1 kill-server   # discard the sandbox when done
+  ```
+  Both accept `--snapshot <dir>` to test a specific snapshot instead of
+  `last`, and `--no-contents` to skip scrollback replay. Note a sandbox
+  restore is a REAL restore into that server: allowlisted commands (ssh,
+  editors, …) are relaunched in its panes and Claude panes get their
+  claude-resume placeholder — kill the sandbox server to end them.
+
 - **`status`** — last save time, recent events, timer state, data dir.
   ```sh
   go-tmux-saver status

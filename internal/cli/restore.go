@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -44,6 +45,10 @@ type RestoreDeps struct {
 	OnStart     bool
 	SnapshotDir string // non-empty overrides Store.Last()
 	NoContents  bool
+	// DryRun builds the plan and reports it without applying anything: no
+	// tmux mutations, no replay dir, no events.log entry. The transport is
+	// still used read-only (QueryLive).
+	DryRun bool
 	// PrepareReplayDir is called at most once, and only once RunRestore has
 	// decided a restore will actually happen (i.e. AFTER the --on-start
 	// seed-only check passes) — so an --on-start run that turns out to be a
@@ -54,11 +59,33 @@ type RestoreDeps struct {
 
 // RestoreOutcome describes what one RunRestore call did.
 type RestoreOutcome struct {
-	Kind                                  string // restored | skipped-not-seed-only | skipped-no-snapshot
+	Kind                                  string // restored | dry-run | skipped-not-seed-only | skipped-no-snapshot
 	Sessions, Windows, Relocated, Skipped int
 	Errors                                int // planned creations that failed (see restore.Report.Notes)
 	Notes                                 []string
-	Duration                              time.Duration
+	// Planned is the human rendering of every planned action — only set for
+	// a dry run.
+	Planned  []string
+	Duration time.Duration
+}
+
+// renderPlan renders a plan's actions for --dry-run output: the exact tmux
+// command lines that would run, plus skip/warn notes and content replays.
+func renderPlan(plan restore.Plan) []string {
+	out := make([]string, 0, len(plan.Actions))
+	for _, a := range plan.Actions {
+		switch a.Kind {
+		case "tmux":
+			out = append(out, "would run: "+a.Args[0])
+		case "contents":
+			out = append(out, "would replay scrollback into "+a.Args[0])
+		case "note":
+			out = append(out, fmt.Sprintf("skip (%s): %s", a.Session, a.Note))
+		case "warn":
+			out = append(out, "warning: "+a.Note)
+		}
+	}
+	return out
 }
 
 // RunRestore queries the live server, decides (for --on-start) whether it's
@@ -75,14 +102,6 @@ func RunRestore(ctx context.Context, d RestoreDeps) (RestoreOutcome, error) {
 
 	if d.OnStart && !restore.IsSeedOnly(live, d.Cfg.SeedSession, d.Cfg.SeedWindow) {
 		return RestoreOutcome{Kind: "skipped-not-seed-only", Duration: time.Since(start)}, nil
-	}
-
-	// A restore will actually happen from here on — only now is it safe to
-	// wipe/create the replay directory (minor: never touch it on an
-	// --on-start skip).
-	replayDir, err := d.PrepareReplayDir()
-	if err != nil {
-		return RestoreOutcome{}, fmt.Errorf("replay dir: %w", err)
 	}
 
 	var snap *snapshot.Snapshot
@@ -170,6 +189,24 @@ func RunRestore(ctx context.Context, d RestoreDeps) (RestoreOutcome, error) {
 	}
 	plan := restore.BuildPlan(live, snap, opts)
 
+	if d.DryRun {
+		return RestoreOutcome{
+			Kind: "dry-run", Sessions: len(snap.Sessions),
+			Windows:   plan.Created + plan.Relocated + plan.Skipped,
+			Relocated: plan.Relocated, Skipped: plan.Skipped,
+			Notes: extraNotes, Planned: renderPlan(plan),
+			Duration: time.Since(start),
+		}, nil
+	}
+
+	// A restore will actually happen from here on — only now is it safe to
+	// wipe/create the replay directory (never touched on an --on-start skip
+	// or a dry run).
+	replayDir, err := d.PrepareReplayDir()
+	if err != nil {
+		return RestoreOutcome{}, fmt.Errorf("replay dir: %w", err)
+	}
+
 	report, err := restore.Apply(ctx, d.T, plan, contentsFn, replayDir)
 	if err != nil {
 		return RestoreOutcome{Notes: append(extraNotes, report.Notes...)}, err
@@ -254,6 +291,23 @@ func prepareReplayDir(dataDir string) (string, error) {
 	return dir, nil
 }
 
+// ensureSandboxServer makes sure a disposable tmux server is listening on
+// socket, starting one (config-less: -f /dev/null, so the user's plugins and
+// hooks never run there) with the configured seed session/window when it is
+// not. Mirrors the tmux-server.service seed shape so --on-start semantics
+// and skip-matching behave like the real thing.
+func ensureSandboxServer(ctx context.Context, socket, seedSession, seedWindow string) error {
+	check := exec.CommandContext(ctx, "tmux", "-L", socket, "-f", "/dev/null", "has-session", "-t", "="+seedSession)
+	if check.Run() == nil {
+		return nil
+	}
+	create := exec.CommandContext(ctx, "tmux", "-L", socket, "-f", "/dev/null", "new-session", "-d", "-s", seedSession, "-n", seedWindow)
+	if out, err := create.CombinedOutput(); err != nil {
+		return fmt.Errorf("start %q: %v: %s", socket, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
 func init() {
 	register(command{"restore", "graft a saved snapshot onto the running tmux server", func(args []string, stdout, stderr io.Writer) int {
 		fs := flag.NewFlagSet("restore", flag.ContinueOnError)
@@ -261,6 +315,8 @@ func init() {
 		fs.Bool("merge", false, "restore additively against whatever is live now (default; this flag exists for explicitness/documentation)")
 		snapshotDir := fs.String("snapshot", "", "restore from this snapshot directory instead of the store's last")
 		noContents := fs.Bool("no-contents", false, "skip pane scrollback replay even if contents are enabled")
+		dryRun := fs.Bool("dry-run", false, "show what would be restored (the exact planned tmux commands) without touching the server")
+		sandbox := fs.String("sandbox", "", "restore into a disposable tmux server on this socket (started with -f /dev/null if needed) instead of the configured one — for test restores")
 		socket := fs.String("socket", "", "override config socket")
 		dataDir := fs.String("data-dir", "", "override config data dir")
 		cfgPath := fs.String("config", config.Path(), "config file")
@@ -277,6 +333,20 @@ func init() {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
+
+		if *sandbox != "" {
+			// A test restore must never be aimed at the real server: the
+			// whole point of the sandbox is that kill-server on it is safe.
+			if *sandbox == cfg.Socket {
+				fmt.Fprintf(stderr, "restore: --sandbox %q is the configured socket — pick a different name for the disposable server\n", *sandbox)
+				return 2
+			}
+			if err := ensureSandboxServer(ctx, *sandbox, cfg.SeedSession, cfg.SeedWindow); err != nil {
+				fmt.Fprintln(stderr, "restore: sandbox server:", err)
+				return 1
+			}
+			cfg.Socket = *sandbox
+		}
 
 		tr, err := openTransport(ctx, cfg)
 		if err != nil {
@@ -295,7 +365,7 @@ func init() {
 
 		o, err := RunRestore(ctx, RestoreDeps{
 			T: tr, Store: store, Cfg: cfg,
-			OnStart: *onStart, SnapshotDir: *snapshotDir, NoContents: *noContents,
+			OnStart: *onStart, SnapshotDir: *snapshotDir, NoContents: *noContents, DryRun: *dryRun,
 			PrepareReplayDir: func() (string, error) { return prepareReplayDir(store.Dir) },
 		})
 		// Print whatever Notes RunRestore accumulated BEFORE reporting an
@@ -318,9 +388,19 @@ func init() {
 			fmt.Fprintln(stdout, "skipped: no snapshot to restore")
 			return 0
 		}
+		if o.Kind == "dry-run" {
+			for _, line := range o.Planned {
+				fmt.Fprintln(stdout, line)
+			}
+			fmt.Fprintf(stdout, "dry run: would restore %d sessions, %d windows (%d relocated, %d skipped)\n", o.Sessions, o.Windows, o.Relocated, o.Skipped)
+			return 0
+		}
 
 		summary, code := restoreSummary(o, *onStart)
 		fmt.Fprintln(stdout, summary)
+		if *sandbox != "" {
+			fmt.Fprintf(stdout, "sandbox: inspect with `tmux -L %s attach`, discard with `tmux -L %s kill-server`\n", *sandbox, *sandbox)
+		}
 		return code
 	}})
 }

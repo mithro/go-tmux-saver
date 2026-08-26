@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -492,5 +493,147 @@ func TestRunRestoreDanglingLastNoFallbackErrors(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "dangling") {
 		t.Fatalf("err = %v, want a dangling-last hard error", err)
+	}
+}
+
+// TestRunRestoreDryRun: --dry-run must show the full plan without mutating
+// anything — no tmux creation commands sent, no replay dir prepared, no
+// events.log entry — and report what WOULD happen.
+func TestRunRestoreDryRun(t *testing.T) {
+	snap := &snapshot.Snapshot{Sessions: []snapshot.Session{
+		{Name: "extra", ActiveWindow: 0, Windows: []snapshot.Window{
+			{Index: 0, Name: "w", Layout: "L1", Panes: []snapshot.Pane{
+				{Index: 0, Cwd: "/", Restore: snapshot.Restore{Kind: "shell"}},
+			}},
+		}},
+	}}
+	snapDir := writeSnapshotDir(t, snap)
+
+	f := &tmuxctl.Fake{
+		Replies: map[string][]string{
+			`list-windows -a -F "#{session_name}\t#{window_index}\t#{window_name}\t#{session_grouped}\t#{session_group}"`: {"default\t0\th\t0\t"},
+			`list-clients -F "#{client_name}"`: {},
+		},
+	}
+	cfg := config.Default()
+	cfg.SeedSession = "default"
+	cfg.SeedWindow = "h"
+	cfg.Contents.Enabled = false
+
+	dataDir := t.TempDir()
+	gz, _ := snapshot.LookupCodec("gzip")
+	store := &snapshot.Store{Dir: dataDir, Codec: gz}
+	if err := store.EnsureDir(); err != nil {
+		t.Fatal(err)
+	}
+
+	prepared := false
+	o, err := RunRestore(context.Background(), RestoreDeps{
+		T: f, Store: store, Cfg: cfg, SnapshotDir: snapDir, DryRun: true,
+		PrepareReplayDir: func() (string, error) { prepared = true; return t.TempDir(), nil },
+	})
+	if err != nil {
+		t.Fatalf("RunRestore: %v", err)
+	}
+	if o.Kind != "dry-run" {
+		t.Fatalf("Kind = %q, want dry-run", o.Kind)
+	}
+	if prepared {
+		t.Error("dry run must not prepare the replay dir")
+	}
+	joined := strings.Join(o.Planned, "\n")
+	if !strings.Contains(joined, "would run: new-session") {
+		t.Errorf("Planned = %q, want the new-session line", o.Planned)
+	}
+	for _, call := range f.Calls {
+		if strings.HasPrefix(call, "new-session") || strings.HasPrefix(call, "new-window") || strings.HasPrefix(call, "send-keys") {
+			t.Errorf("dry run sent a mutating tmux command: %s", call)
+		}
+	}
+	if ev, _ := snapshot.TailEvents(dataDir, 5); len(ev) != 0 {
+		t.Errorf("dry run wrote events: %+v", ev)
+	}
+	if o.Windows != 1 || o.Sessions != 1 {
+		t.Errorf("counts = %d sessions %d windows, want 1/1", o.Sessions, o.Windows)
+	}
+}
+
+// TestRestoreCLIDryRunOutput: the subcommand prints the would-run lines and
+// a "dry run:" summary, exit 0.
+func TestRestoreCLIDryRunOutput(t *testing.T) {
+	sock := tmuxctl.StartTestServer(t)
+	cfgFile := writeTestConfig(t, sock)
+	snap := &snapshot.Snapshot{Sessions: []snapshot.Session{
+		{Name: "extra", ActiveWindow: 0, Windows: []snapshot.Window{
+			{Index: 0, Name: "w", Layout: "L1", Panes: []snapshot.Pane{
+				{Index: 0, Cwd: "/", Restore: snapshot.Restore{Kind: "shell"}},
+			}},
+		}},
+	}}
+	snapDir := writeSnapshotDir(t, snap)
+
+	var out, errb bytes.Buffer
+	code := Run([]string{"restore", "--dry-run", "--no-contents", "--snapshot", snapDir, "--config", cfgFile, "--data-dir", t.TempDir()}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit %d; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	if !strings.Contains(out.String(), "would run: new-session") || !strings.Contains(out.String(), "dry run:") {
+		t.Fatalf("stdout = %q, want would-run lines + dry run summary", out.String())
+	}
+	// The extra session must NOT exist on the live server afterwards.
+	lw, _ := exec.Command("tmux", "-L", sock, "list-windows", "-a", "-F", "#{session_name}").Output()
+	if strings.Contains(string(lw), "extra") {
+		t.Fatalf("dry run created windows: %s", lw)
+	}
+}
+
+// TestRestoreCLISandbox: --sandbox restores into a disposable tmux server
+// on the named socket (started automatically with -f /dev/null), leaving
+// the configured socket untouched, and prints attach/discard hints.
+func TestRestoreCLISandbox(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	sandboxSock := fmt.Sprintf("gts-sbx-%d", os.Getpid())
+	t.Cleanup(func() { exec.Command("tmux", "-L", sandboxSock, "kill-server").Run() })
+
+	cfgFile := writeTestConfig(t, "gts-nonexistent-main") // configured socket: never touched
+	snap := &snapshot.Snapshot{Sessions: []snapshot.Session{
+		{Name: "extra", ActiveWindow: 0, Windows: []snapshot.Window{
+			{Index: 0, Name: "w", Layout: "L1", Panes: []snapshot.Pane{
+				{Index: 0, Cwd: "/", Restore: snapshot.Restore{Kind: "shell"}},
+			}},
+		}},
+	}}
+	snapDir := writeSnapshotDir(t, snap)
+
+	var out, errb bytes.Buffer
+	code := Run([]string{"restore", "--sandbox", sandboxSock, "--no-contents", "--snapshot", snapDir, "--config", cfgFile, "--data-dir", t.TempDir()}, &out, &errb)
+	if code != 0 {
+		t.Fatalf("exit %d; stdout=%q stderr=%q", code, out.String(), errb.String())
+	}
+	if !strings.Contains(out.String(), "tmux -L "+sandboxSock+" attach") {
+		t.Fatalf("stdout = %q, want the attach hint", out.String())
+	}
+	lw, err := exec.Command("tmux", "-L", sandboxSock, "list-windows", "-a", "-F", "#{session_name}:#{window_index} #{window_name}").Output()
+	if err != nil {
+		t.Fatalf("sandbox server not running: %v", err)
+	}
+	if !strings.Contains(string(lw), "extra:0 w") {
+		t.Fatalf("sandbox windows = %q, want the restored extra:0 w", lw)
+	}
+}
+
+// TestRestoreCLISandboxRefusesConfiguredSocket: restoring "into a sandbox"
+// that is actually the configured production socket must be refused.
+func TestRestoreCLISandboxRefusesConfiguredSocket(t *testing.T) {
+	cfgFile := writeTestConfig(t, "gts-prod-sock")
+	var out, errb bytes.Buffer
+	code := Run([]string{"restore", "--sandbox", "gts-prod-sock", "--config", cfgFile, "--data-dir", t.TempDir()}, &out, &errb)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2; stderr=%q", code, errb.String())
+	}
+	if !strings.Contains(errb.String(), "sandbox") {
+		t.Fatalf("stderr = %q, want a sandbox-refusal message", errb.String())
 	}
 }
