@@ -21,7 +21,7 @@ import (
 
 func saveFake() *tmuxctl.Fake {
 	return &tmuxctl.Fake{Replies: map[string][]string{
-		collect.SessCmd:                 {"default\t0\t1"},
+		collect.SessCmd:                 {"default\t\t0\t1"},
 		collect.WinCmd:                  {"default\t0\tw\t1\t*\tL\ton"},
 		collect.PaneCmd:                 {"default\t0\t0\t%0\t1\t100\t/home/tim\tt\t1", "default\t0\t1\t%1\t0\t300\t/home/tim\tt\t1"},
 		collect.ServerCmd:               {"1\tnext-3.8\tdefault"},
@@ -51,7 +51,7 @@ func TestSaveOutcomes(t *testing.T) {
 		t.Fatalf("second identical save should be unchanged, got %+v", o)
 	}
 	// degenerate: server now shows 0 panes
-	d.T = &tmuxctl.Fake{Replies: map[string][]string{collect.SessCmd: {"default\t0\t1"}, collect.WinCmd: {}, collect.PaneCmd: {},
+	d.T = &tmuxctl.Fake{Replies: map[string][]string{collect.SessCmd: {"default\t\t0\t1"}, collect.WinCmd: {}, collect.PaneCmd: {},
 		collect.ServerCmd: {"1\tnext-3.8\tdefault"}}, Default: []string{}}
 	o, _ = RunSave(ctx, d)
 	if o.Kind != "rejected-degenerate" || o.LastPanes != 2 {

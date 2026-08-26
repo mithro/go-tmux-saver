@@ -13,7 +13,7 @@ import (
 
 func fakeServer() *tmuxctl.Fake {
 	return &tmuxctl.Fake{Replies: map[string][]string{
-		SessCmd: {"default\t0\t1", "default-1\t1\t1", "net\t0\t0"},
+		SessCmd: {"default\tdefault\t1\t1", "default-1\tdefault\t1\t1", "net\t\t0\t0"},
 		WinCmd:  {"default\t0\th\t1\t*\tbfbf,80x24,0,0,0\ton", "default-1\t0\th\t1\t*\tx\ton", "net\t2\tswcfg\t1\t*\tdead,80x24,0,0{40x24,0,0,1,39x24,41,0,2}\toff"},
 		PaneCmd: {"default\t0\t0\t%0\t1\t100\t/home/tim\ttim@ten64: ~\t3", "default-1\t0\t0\t%0\t1\t100\t/home/tim\tx\t3",
 			"net\t2\t0\t%1\t1\t300\t/home/tim/net\t✳ switch config\t2", "net\t2\t1\t%2\t0\t200\t/home/tim\tten64\t0"},
@@ -85,7 +85,7 @@ func TestCollectPaneTitleWithEmbeddedTab(t *testing.T) {
 	f := &tmuxctl.Fake{Replies: map[string][]string{
 		ServerCmd:                       {"100\tnext-3.8\tour-control-client"},
 		ClientsCmd:                      {},
-		SessCmd:                         {"default\t0\t1"},
+		SessCmd:                         {"default\t\t0\t1"},
 		WinCmd:                          {"default\t0\th\t1\t*\tlayout\ton"},
 		PaneCmd:                         {"default\t0\t0\t%0\t1\t100\t/home/tim\thas\ttab in it\t5"},
 		"capture-pane -epJ -S -5 -t %0": {"z"},
@@ -112,7 +112,7 @@ func TestCollectMalformedPaneLineErrors(t *testing.T) {
 	f := &tmuxctl.Fake{Replies: map[string][]string{
 		ServerCmd:  {"100\tnext-3.8\tour-control-client"},
 		ClientsCmd: {},
-		SessCmd:    {"default\t0\t1"},
+		SessCmd:    {"default\t\t0\t1"},
 		WinCmd:     {"default\t0\th\t1\t*\tlayout\ton"},
 		PaneCmd:    {"default\t0\t0\t%0\t1\t100\t/home/tim"}, // only 7 of 9 fields
 	}}
@@ -140,7 +140,7 @@ func TestCollectCapturePaneTransportErrorPropagates(t *testing.T) {
 		Fake: &tmuxctl.Fake{Replies: map[string][]string{
 			ServerCmd:  {"100\tnext-3.8\tour-control-client"},
 			ClientsCmd: {},
-			SessCmd:    {"default\t0\t1"},
+			SessCmd:    {"default\t\t0\t1"},
 			WinCmd:     {"default\t0\th\t1\t*\tlayout\ton"},
 			PaneCmd:    {"default\t0\t0\t%0\t1\t100\t/home/tim\ttitle\t3"},
 		}},
@@ -182,7 +182,7 @@ func TestCollectCapturePaneCmdErrorWarnsAndContinues(t *testing.T) {
 		Fake: &tmuxctl.Fake{Replies: map[string][]string{
 			ServerCmd:                       {"100\tnext-3.8\tour-control-client"},
 			ClientsCmd:                      {},
-			SessCmd:                         {"default\t0\t1"},
+			SessCmd:                         {"default\t\t0\t1"},
 			WinCmd:                          {"default\t0\th\t1\t*\tlayout\ton"},
 			PaneCmd:                         {"default\t0\t0\t%0\t1\t100\t/home/tim\tok\t3", "default\t0\t1\t%57\t0\t100\t/home/tim\tgone\t3"},
 			"capture-pane -epJ -S -3 -t %0": {"still", "here"},
@@ -260,5 +260,69 @@ func TestCollectClientSessionIsMostRecentNonControlClient(t *testing.T) {
 	}
 	if snap.Client.Session != "newer\twith\ttab" {
 		t.Fatalf("client session = %q, want the most-recently-active non-control client's session", snap.Client.Session)
+	}
+}
+
+// TestCollectKeepsOneGroupedSessionMember covers issue #12, with fixture
+// lines shaped like the real ten64 incident: EVERY member of a tmux session
+// group reports session_grouped=1 (there is no "original" flagged 0), so
+// the old skip-if-grouped rule silently dropped the whole group — 6 windows
+// including live Claude sessions. Exactly one canonical member must survive
+// (name == group name when present, else lexically smallest), with its
+// windows and panes; the clones' duplicate window/pane lines stay excluded.
+func TestCollectKeepsOneGroupedSessionMember(t *testing.T) {
+	f := &tmuxctl.Fake{Replies: map[string][]string{
+		SessCmd: {
+			"433mhz\t\t0\t0",
+			"default\tdefault\t1\t1",
+			"default-36\tdefault\t1\t1",
+			"orphan-2\torphan\t1\t0", // group whose eponymous member is gone
+			"orphan-9\torphan\t1\t0",
+		},
+		WinCmd: {
+			"433mhz\t0\tesp32\t1\t*\tL1\toff",
+			"default\t0\th\t1\t*\tL2\ton",
+			"default\t1\ttmux-restore\t0\t\tL3\toff",
+			"default-36\t0\th\t1\t*\tL2\ton",
+			"default-36\t1\ttmux-restore\t0\t\tL3\toff",
+			"orphan-2\t0\tw\t1\t*\tL4\toff",
+			"orphan-9\t0\tw\t1\t*\tL4\toff",
+		},
+		PaneCmd: {
+			"433mhz\t0\t0\t%1\t1\t100\t/home/tim\tt\t0",
+			"default\t0\t0\t%2\t1\t100\t/home/tim\tt\t0",
+			"default\t1\t0\t%3\t1\t100\t/home/tim\tt\t0",
+			"default-36\t0\t0\t%2\t1\t100\t/home/tim\tt\t0",
+			"default-36\t1\t0\t%3\t1\t100\t/home/tim\tt\t0",
+			"orphan-2\t0\t0\t%4\t1\t100\t/home/tim\tt\t0",
+			"orphan-9\t0\t0\t%4\t1\t100\t/home/tim\tt\t0",
+		},
+		ServerCmd:                       {"1787201600\tnext-3.8\t/dev/pts/99"},
+		ClientsCmd:                      {},
+		"capture-pane -epJ -S -0 -t %1": {""},
+		"capture-pane -epJ -S -0 -t %2": {""},
+		"capture-pane -epJ -S -0 -t %3": {""},
+		"capture-pane -epJ -S -0 -t %4": {""},
+	}}
+	tb, _ := procs.Scan("../procs/testdata/proc")
+	c := &Collector{T: f, Procs: tb, Reg: procs.ClaudeRegistry{Dir: "../procs/testdata/sessions"},
+		Allowlist: procs.DefaultAllowlist, Host: "h", Now: func() time.Time { return time.Unix(100, 0).UTC() }}
+	snap, _, _, err := c.Collect(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := []string{}
+	for _, se := range snap.Sessions {
+		names = append(names, se.Name)
+	}
+	want := []string{"433mhz", "default", "orphan-2"}
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Fatalf("sessions = %v, want %v (one canonical member per group)", names, want)
+	}
+	if len(snap.Sessions[1].Windows) != 2 || snap.Sessions[1].Windows[1].Name != "tmux-restore" {
+		t.Fatalf("default windows = %+v, want both group windows kept once", snap.Sessions[1].Windows)
+	}
+	if n, _ := snap.CountPanes(); n != 4 {
+		t.Fatalf("panes = %d, want 4 (no clone double-counting)", n)
 	}
 }

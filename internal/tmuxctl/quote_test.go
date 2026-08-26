@@ -51,3 +51,20 @@ func TestUnvisName(t *testing.T) {
 		}
 	}
 }
+
+// TestCanonicalMember covers issue #12's selection rule: one member per
+// session group survives into snapshots/LiveState — the member whose name
+// equals the group name when present (the usual case: tmux names the group
+// after the original session), else the lexically smallest member so the
+// choice is deterministic.
+func TestCanonicalMember(t *testing.T) {
+	if got := CanonicalMember("default", []string{"default-36", "default", "default-25"}); got != "default" {
+		t.Errorf("name==group should win, got %q", got)
+	}
+	if got := CanonicalMember("default", []string{"default-36", "default-25"}); got != "default-25" {
+		t.Errorf("lexically smallest fallback, got %q", got)
+	}
+	if got := CanonicalMember("g", []string{"only"}); got != "only" {
+		t.Errorf("single member, got %q", got)
+	}
+}
