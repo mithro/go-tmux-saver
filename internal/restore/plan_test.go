@@ -38,7 +38,7 @@ func TestIsSeedOnly(t *testing.T) {
 func TestPlanOnSeedServer(t *testing.T) {
 	t.Setenv("HOME", "/home/tim")
 	live := LiveState{Sessions: map[string][]LiveWindow{"default": {{0, "h"}}}}
-	p := BuildPlan(live, snapNet(), Options{ClaudeResumePath: "/home/tim/bin/claude-resume", Contents: true, SeedSession: "default", SeedWindow: "h"})
+	p := BuildPlan(live, snapNet(), Options{ClaudeResumeArgv: []string{"/home/tim/bin/claude-resume"}, Contents: true, SeedSession: "default", SeedWindow: "h"})
 	cmds := strings.Join(flatten(p), "\n")
 	for _, want := range []string{
 		`new-window -d -t "=default:1" -n "rcfiles" -c "/tmp"`,

@@ -33,7 +33,7 @@ type Config struct {
 		Rejected  int `json:"rejected"`
 	} `json:"retention"`
 	MailTo           string `json:"mail_to"`            // $USER
-	ClaudeResumePath string `json:"claude_resume_path"` // ~/bin/claude-resume
+	ClaudeResumePath string `json:"claude_resume_path"` // "" = built-in `go-tmux-saver claude-resume`; set to use an external script
 	DataDir          string `json:"-"`                  // derived: $XDG_DATA_HOME/go-tmux-saver
 }
 
@@ -54,7 +54,7 @@ func Default() Config {
 	c.Retention.DailyDays = 30
 	c.Retention.Rejected = 20
 	c.MailTo = os.Getenv("USER")
-	c.ClaudeResumePath = "~/bin/claude-resume"
+	c.ClaudeResumePath = "" // built-in claude-resume subcommand
 	c.DataDir = DataDir()
 	return c
 }

@@ -35,6 +35,21 @@ func expandHome(p string) string {
 	return p
 }
 
+// claudeResumeArgv resolves the command a restore types into Claude panes:
+// an explicitly configured script path (claude_resume_path), or — the
+// default, empty — this very binary's built-in `claude-resume` subcommand,
+// so rollout hosts need no extra script.
+func claudeResumeArgv(cfgPath string) []string {
+	if cfgPath != "" {
+		return []string{expandHome(cfgPath)}
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		exe = "go-tmux-saver" // resolvable via PATH in the pane's shell
+	}
+	return []string{exe, "claude-resume"}
+}
+
 // RestoreDeps bundles everything RunRestore needs, so it can be driven by
 // real tmux state (the "restore" subcommand below) or a tmuxctl.Fake/live
 // test server (tests) — mirrors SaveDeps/RunSave's shape.
@@ -182,7 +197,7 @@ func RunRestore(ctx context.Context, d RestoreDeps) (RestoreOutcome, error) {
 	}
 
 	opts := restore.Options{
-		ClaudeResumePath: expandHome(d.Cfg.ClaudeResumePath),
+		ClaudeResumeArgv: claudeResumeArgv(d.Cfg.ClaudeResumePath),
 		Contents:         contentsEnabled,
 		SeedSession:      d.Cfg.SeedSession,
 		SeedWindow:       d.Cfg.SeedWindow,

@@ -637,3 +637,15 @@ func TestRestoreCLISandboxRefusesConfiguredSocket(t *testing.T) {
 		t.Fatalf("stderr = %q, want a sandbox-refusal message", errb.String())
 	}
 }
+
+// TestRunRestoreDefaultUsesBuiltinClaudeResume: with claude_resume_path
+// left at its default (empty), the plan's Claude panes type this binary's
+// own `claude-resume` subcommand — no external script needed on the host.
+func TestRunRestoreDefaultUsesBuiltinClaudeResume(t *testing.T) {
+	if got := claudeResumeArgv(""); len(got) != 2 || got[1] != "claude-resume" || !strings.Contains(got[0], string(os.PathSeparator)) {
+		t.Fatalf("builtin argv = %q, want [<this-binary> claude-resume]", got)
+	}
+	if got := claudeResumeArgv("~/bin/claude-resume"); len(got) != 1 || strings.Contains(got[0], "~") {
+		t.Fatalf("external argv = %q, want the tilde-expanded script path alone", got)
+	}
+}

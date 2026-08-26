@@ -86,6 +86,16 @@ split. Off by default; normal output is unchanged.
   editors, …) are relaunched in its panes and Claude panes get their
   claude-resume placeholder — kill the sandbox server to end them.
 
+- **`claude-resume [session-id]`** — the built-in placeholder a restore
+  types into each saved Claude pane. It shows which conversation the pane
+  held (project, branch, one-line summary, last-active time, read from the
+  session's transcript) and waits: **Enter** resumes (`exec claude --resume
+  <id>`, run from the session's original launch directory so Claude finds
+  the project), **Ctrl-C** leaves a shell. With no/an unrecognised id it
+  falls back to plain `claude` (the resume picker). When stdin is not a
+  terminal it announces and resumes immediately instead of blocking. A pane
+  still sitting at the placeholder saves back as the same Claude pane.
+
 - **`status`** — last save time, recent events, timer state, data dir.
   ```sh
   go-tmux-saver status
@@ -169,7 +179,7 @@ generate` prints.
 | `retention.daily_days` | `30` | days over which one snapshot per day is kept beyond `keep` |
 | `retention.rejected` | `20` | rejected snapshots kept |
 | `mail_to` | `$USER` | recipient for failure/recovery alerts (via `sendmail -t`) |
-| `claude_resume_path` | `~/bin/claude-resume` | helper used to relaunch a Claude session in a restored pane |
+| `claude_resume_path` | `""` (built-in) | command typed into restored Claude panes. Empty = the binary's own `claude-resume` subcommand (no extra script needed); set a path to use an external helper instead |
 
 The data directory is derived, not configurable in the file — use
 `--data-dir` or `$XDG_DATA_HOME`.

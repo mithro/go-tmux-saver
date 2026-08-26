@@ -22,7 +22,7 @@ import (
 // which would type the saved bytes as keystrokes into a live shell).
 func TestApplyRelocationAndContentsReplay(t *testing.T) {
 	live := LiveState{Sessions: map[string][]LiveWindow{"default": {{0, "h"}, {1, "tmux-restore"}}}}
-	p := BuildPlan(live, snapNet(), Options{Contents: true, ClaudeResumePath: "/home/tim/bin/claude-resume", SeedSession: "default", SeedWindow: "h"})
+	p := BuildPlan(live, snapNet(), Options{Contents: true, ClaudeResumeArgv: []string{"/home/tim/bin/claude-resume"}, SeedSession: "default", SeedWindow: "h"})
 
 	f := &tmuxctl.Fake{
 		Replies: map[string][]string{
