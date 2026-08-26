@@ -89,12 +89,12 @@ func TestPlanSkipsRelocationWhenSameNameExistsElsewhere(t *testing.T) {
 	}
 	found := false
 	for _, a := range p.Actions {
-		if a.Kind == "note" && a.Note == "present at index 7" {
+		if a.Kind == "note" && a.Note == `default "rcfiles" present at index 7` {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("expected a %q skip note, actions: %+v", "present at index 7", p.Actions)
+		t.Fatalf("expected a %q skip note, actions: %+v", `default "rcfiles" present at index 7`, p.Actions)
 	}
 	// default:0 "h" (already-present skip) + default:1 "rcfiles" (present
 	// elsewhere skip) = 2 skipped; net:0 "swcfg" is still created fresh.

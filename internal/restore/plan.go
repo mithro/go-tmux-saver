@@ -242,7 +242,7 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 					plan.tmux(sess.Name, fmt.Sprintf("new-window -d -t %s -n %s%s", tmuxQuote(target), tmuxQuote(win.Name), cwdArg(cwd0)), "")
 				case liveName == win.Name:
 					plan.Skipped++
-					plan.note(sess.Name, "skipped")
+					plan.note(sess.Name, fmt.Sprintf("%s:%d %q already present", sess.Name, win.Index, win.Name))
 					continue
 				default:
 					// RULING R27: don't relocate a same-named window that
@@ -251,7 +251,7 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 					// by the foreign window forever) is not idempotent.
 					if idx, ok := findWindowByName(liveWins, win.Name); ok {
 						plan.Skipped++
-						plan.note(sess.Name, fmt.Sprintf("present at index %d", idx))
+						plan.note(sess.Name, fmt.Sprintf("%s %q present at index %d", sess.Name, win.Name, idx))
 						continue
 					}
 					target = fmt.Sprintf("=%s:%s", sess.Name, WinPlaceholder)
