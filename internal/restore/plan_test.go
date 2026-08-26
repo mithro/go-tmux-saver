@@ -386,3 +386,38 @@ func TestBuildPlanRenameWindowForEncodedNames(t *testing.T) {
 		t.Errorf("rename = %q, want %q (decoded name, quoted)", renames[0], want)
 	}
 }
+
+// TestBuildPlanRelocationsOrderedLast covers the ten64 rollout-verification
+// find: a relocation uses tmux's next-free index, so emitting it BEFORE the
+// session's fixed-index creations let it steal an index a later window
+// legitimately owned (live seed h at 0; saved bash at 0 relocates and tmux
+// picks 1; saved tmux-restore then fails "index 1 in use"). All fixed-index
+// creations must therefore precede any relocation within a session.
+func TestBuildPlanRelocationsOrderedLast(t *testing.T) {
+	snap := &snapshot.Snapshot{Sessions: []snapshot.Session{
+		{Name: "default", ActiveWindow: 1, Windows: []snapshot.Window{
+			{Index: 0, Name: "bash", Layout: "L0", Panes: []snapshot.Pane{{Index: 0, Cwd: "/", Restore: snapshot.Restore{Kind: "shell"}}}},
+			{Index: 1, Name: "tmux-restore", Layout: "L1", Panes: []snapshot.Pane{{Index: 0, Cwd: "/", Restore: snapshot.Restore{Kind: "shell"}}}},
+			{Index: 2, Name: "rcfiles", Layout: "L2", Panes: []snapshot.Pane{{Index: 0, Cwd: "/", Restore: snapshot.Restore{Kind: "shell"}}}},
+		}},
+	}}
+	live := LiveState{Sessions: map[string][]LiveWindow{"default": {{Index: 0, Name: "h"}}}}
+	plan := BuildPlan(live, snap, Options{})
+	if plan.Relocated != 1 || plan.Created != 2 {
+		t.Fatalf("relocated=%d created=%d, want 1/2", plan.Relocated, plan.Created)
+	}
+	relocAt, lastFixedAt := -1, -1
+	for i, a := range plan.Actions {
+		if a.Kind != "tmux" {
+			continue
+		}
+		if strings.HasPrefix(a.Args[0], "new-window -d -P") {
+			relocAt = i
+		} else if strings.HasPrefix(a.Args[0], "new-window -d -t") {
+			lastFixedAt = i
+		}
+	}
+	if relocAt == -1 || lastFixedAt == -1 || relocAt < lastFixedAt {
+		t.Fatalf("relocation at action %d must come after the last fixed-index creation at %d:\n%+v", relocAt, lastFixedAt, plan.Actions)
+	}
+}
