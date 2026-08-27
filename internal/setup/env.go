@@ -19,4 +19,12 @@ type Env struct {
 	Systemctl    func(args ...string) (string, error)
 	TmuxBindings func() (string, error)
 	Stdout       io.Writer
+	// ClaudeResumeLink is the path setup manages as a symlink to Binary
+	// (normally ~/bin/claude-resume), so the placeholder keeps working
+	// under its historical name with no external script. Empty disables
+	// link management (older tests, `setup generate`). See
+	// EnsureClaudeResumeLink for the strict replace-only-known rules.
+	ClaudeResumeLink string
+	// Binary is this executable's resolved path — the symlink target.
+	Binary string
 }

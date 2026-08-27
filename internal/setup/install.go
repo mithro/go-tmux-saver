@@ -126,6 +126,20 @@ func Install(env Env, files []Managed) error {
 	if _, err := env.Systemctl(args...); err != nil {
 		return fmt.Errorf("setup: enable timers: %w", err)
 	}
+	return ensureLinkAndReport(env, false)
+}
+
+// ensureLinkAndReport runs EnsureClaudeResumeLink and prints its note when
+// something happened (or was deliberately refused) — a silent "already ok"
+// stays silent, so Update's write path calling Install doesn't double-log.
+func ensureLinkAndReport(env Env, dryRun bool) error {
+	changed, note, err := EnsureClaudeResumeLink(env, dryRun)
+	if err != nil {
+		return err
+	}
+	if env.Stdout != nil && (changed || strings.Contains(note, "left unchanged")) {
+		fmt.Fprintln(env.Stdout, note)
+	}
 	return nil
 }
 
@@ -166,6 +180,12 @@ func Update(env Env, files []Managed, dryRun bool) (changed []string, err error)
 		changed = append(changed, f.Rel)
 		toWrite = append(toWrite, f)
 		diffs[f.Rel] = diffLines(string(f.Content), string(data))
+	}
+
+	// The claude-resume link is checked on every Update, including when no
+	// managed file changed — a broken/stale link is drift too.
+	if err := ensureLinkAndReport(env, dryRun); err != nil {
+		return changed, err
 	}
 
 	if len(changed) == 0 {

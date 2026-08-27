@@ -96,6 +96,16 @@ split. Off by default; normal output is unchanged.
   terminal it announces and resumes immediately instead of blocking. A pane
   still sitting at the placeholder saves back as the same Claude pane.
 
+  `setup install`/`update` also manage **`~/bin/claude-resume`** as a
+  symlink to this binary (invoked by that name, the binary IS the
+  placeholder — busybox-style), so old resurrect saves and muscle memory
+  keep working. The link is only created when absent, and only ever
+  REPLACES a broken symlink, a symlink to an old go-tmux-saver binary, or
+  the known rcfiles claude-resume script (by content checksum — plain or
+  symlinked); an unknown script/binary or a symlink to a different tool is
+  left strictly alone (reported at install time, and never counted as
+  validate drift).
+
 - **`status`** — last save time, recent events, timer state, data dir.
   ```sh
   go-tmux-saver status

@@ -30,6 +30,9 @@ type Drift struct {
 // verify, then the drop-in, then key bindings).
 func Validate(env Env, files []Managed) []Drift {
 	var drifts []Drift
+	if d, ok := ClaudeResumeDrift(env); ok {
+		drifts = append(drifts, d)
+	}
 
 	for _, f := range files {
 		if d, ok := validateFile(env, f); ok {
