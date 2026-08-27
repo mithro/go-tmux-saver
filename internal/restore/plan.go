@@ -21,9 +21,15 @@ type Options struct {
 	// "claude-resume"] (the built-in placeholder) or a configured external
 	// script as a single element.
 	ClaudeResumeArgv []string
-	Contents         bool
-	SeedSession      string
-	SeedWindow       string
+	// ClaudeResumeSuffix is appended AFTER the session id (issue #15: the
+	// built-in placeholder gets "--no-saved" on restore, where the cat
+	// replay already reproduced the pane's console state — the id must stay
+	// directly after `claude-resume` for /proc re-detection). Empty for
+	// external scripts.
+	ClaudeResumeSuffix []string
+	Contents           bool
+	SeedSession        string
+	SeedWindow         string
 }
 
 // Action is one step of a Plan. Kind is one of:
@@ -307,7 +313,7 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 						plan.tmux(sess.Name, fmt.Sprintf("send-keys -t %s %s Enter", tmuxQuote(paneTarget), tmuxQuote(shellQuote(pn.Restore.Argv))), "")
 					}
 				case "claude":
-					plan.tmux(sess.Name, fmt.Sprintf("send-keys -t %s %s Enter", tmuxQuote(paneTarget), tmuxQuote(shellQuote(append(append([]string{}, o.ClaudeResumeArgv...), pn.Restore.ClaudeSession)))), "")
+					plan.tmux(sess.Name, fmt.Sprintf("send-keys -t %s %s Enter", tmuxQuote(paneTarget), tmuxQuote(shellQuote(append(append(append([]string{}, o.ClaudeResumeArgv...), pn.Restore.ClaudeSession), o.ClaudeResumeSuffix...)))), "")
 				}
 			}
 			plan.tmux(sess.Name, fmt.Sprintf("select-pane -t %s", tmuxQuote(fmt.Sprintf("%s.%d", target, activePane))), "")

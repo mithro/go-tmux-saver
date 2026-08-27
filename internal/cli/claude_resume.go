@@ -3,16 +3,20 @@ package cli
 import (
 	"bufio"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"unsafe"
 
+	"github.com/mithro/go-tmux-saver/internal/config"
 	"github.com/mithro/go-tmux-saver/internal/resume"
+	"github.com/mithro/go-tmux-saver/internal/snapshot"
 )
 
 // execveFn/lookPathFn are syscall.Exec and exec.LookPath, swappable in
@@ -61,14 +65,79 @@ func readLineInterruptible(r io.Reader) (string, error) {
 	}
 }
 
+// savedFromStore finds the last snapshot's pane whose restore is this
+// Claude session and returns its saved scrollback (issue #15) — the
+// best-effort source when claude-suspend didn't hand over a capture file.
+func savedFromStore(store *snapshot.Store, sid string) []byte {
+	snap, dir, err := store.Last()
+	if err != nil {
+		return nil
+	}
+	for _, se := range snap.Sessions {
+		for _, w := range se.Windows {
+			for _, p := range w.Panes {
+				if p.Restore.Kind == "claude" && p.Restore.ClaudeSession == sid {
+					data, err := store.ReadContent(dir, p)
+					if err != nil {
+						return nil
+					}
+					return data
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func init() {
 	register(command{"claude-resume", "confirm, then resume a specific Claude session (the placeholder a restore types into Claude panes)", func(args []string, stdout, stderr io.Writer) int {
+		fs := flag.NewFlagSet("claude-resume", flag.ContinueOnError)
+		savedFile := fs.String("saved-output", "", "print this file's content above the banner (claude-suspend's pane capture)")
+		noSaved := fs.Bool("no-saved", false, "print no saved console output above the banner")
+		savedLines := fs.Int("saved-lines", 100, "how many trailing lines of store-looked-up scrollback to print (0 = all; --saved-output files always print whole)")
+		socket := fs.String("socket", "", "override config socket (unused; accepted for uniformity)")
+		dataDir := fs.String("data-dir", "", "override config data dir (for the saved-output store lookup)")
+		cfgPath := fs.String("config", config.Path(), "config file")
+		fs.SetOutput(stderr)
+		// Like import-resurrect (RULING R36): the session id may come first
+		// (`claude-resume <sid> --saved-output f`) — generated command lines
+		// use that order so /proc re-detection keeps matching
+		// `claude-resume <uuid>` — or flags may come first.
 		sid := ""
-		if len(args) > 0 {
+		if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 			sid = args[0]
+			if err := fs.Parse(args[1:]); err != nil {
+				return 2
+			}
+		} else {
+			if err := fs.Parse(args); err != nil {
+				return 2
+			}
+			if fs.NArg() > 0 {
+				sid = fs.Arg(0)
+			}
 		}
+
 		home, _ := os.UserHomeDir()
 		projects := filepath.Join(home, ".claude", "projects")
+
+		// Issue #15: reproduce the pane's last console state above the
+		// banner. An explicit capture file wins; else best-effort store
+		// lookup by session id. Failures here are silent — the banner and
+		// resume must never be blocked by missing context.
+		if !*noSaved {
+			if *savedFile != "" {
+				if data, err := os.ReadFile(*savedFile); err == nil {
+					stdout.Write(data)
+				}
+			} else if sid != "" {
+				if _, store, _, code := commonSetup(*cfgPath, *socket, *dataDir); code == 0 {
+					if data := savedFromStore(store, sid); data != nil {
+						stdout.Write(resume.TailLines(data, *savedLines))
+					}
+				}
+			}
+		}
 
 		d := resume.Decide(stdout, home, projects, sid,
 			isTTY(os.Stdout), isTTY(os.Stdin),

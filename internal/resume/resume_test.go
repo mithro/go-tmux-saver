@@ -148,3 +148,19 @@ func TestDecideJunkSidFallsBackToPicker(t *testing.T) {
 		t.Fatalf("picker banner missing: %q", out.String())
 	}
 }
+
+func TestTailLines(t *testing.T) {
+	data := []byte("a\nb\nc\nd\n")
+	if got := string(TailLines(data, 2)); got != "c\nd\n" {
+		t.Fatalf("TailLines(2) = %q", got)
+	}
+	if got := string(TailLines(data, 0)); got != "a\nb\nc\nd\n" {
+		t.Fatalf("TailLines(0) = %q (0 = everything)", got)
+	}
+	if got := string(TailLines(data, 10)); got != "a\nb\nc\nd\n" {
+		t.Fatalf("TailLines(10) = %q", got)
+	}
+	if got := string(TailLines([]byte("no-trailing-newline"), 1)); got != "no-trailing-newline" {
+		t.Fatalf("TailLines(no-nl) = %q", got)
+	}
+}
