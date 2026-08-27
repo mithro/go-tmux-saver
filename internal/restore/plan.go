@@ -16,7 +16,11 @@ const WinPlaceholder = "{{WIN}}"
 
 // Options configures how BuildPlan restores a snapshot onto a live server.
 type Options struct {
-	ClaudeResumePath string
+	// ClaudeResumeArgv is the command prefix typed into each saved Claude
+	// pane, with the session id appended — e.g. ["/usr/bin/go-tmux-saver",
+	// "claude-resume"] (the built-in placeholder) or a configured external
+	// script as a single element.
+	ClaudeResumeArgv []string
 	Contents         bool
 	SeedSession      string
 	SeedWindow       string
@@ -242,7 +246,7 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 					plan.tmux(sess.Name, fmt.Sprintf("new-window -d -t %s -n %s%s", tmuxQuote(target), tmuxQuote(win.Name), cwdArg(cwd0)), "")
 				case liveName == win.Name:
 					plan.Skipped++
-					plan.note(sess.Name, "skipped")
+					plan.note(sess.Name, fmt.Sprintf("%s:%d %q already present", sess.Name, win.Index, win.Name))
 					continue
 				default:
 					// RULING R27: don't relocate a same-named window that
@@ -251,7 +255,7 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 					// by the foreign window forever) is not idempotent.
 					if idx, ok := findWindowByName(liveWins, win.Name); ok {
 						plan.Skipped++
-						plan.note(sess.Name, fmt.Sprintf("present at index %d", idx))
+						plan.note(sess.Name, fmt.Sprintf("%s %q present at index %d", sess.Name, win.Name, idx))
 						continue
 					}
 					target = fmt.Sprintf("=%s:%s", sess.Name, WinPlaceholder)
@@ -303,7 +307,7 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 						plan.tmux(sess.Name, fmt.Sprintf("send-keys -t %s %s Enter", tmuxQuote(paneTarget), tmuxQuote(shellQuote(pn.Restore.Argv))), "")
 					}
 				case "claude":
-					plan.tmux(sess.Name, fmt.Sprintf("send-keys -t %s %s Enter", tmuxQuote(paneTarget), tmuxQuote(shellQuote([]string{o.ClaudeResumePath, pn.Restore.ClaudeSession}))), "")
+					plan.tmux(sess.Name, fmt.Sprintf("send-keys -t %s %s Enter", tmuxQuote(paneTarget), tmuxQuote(shellQuote(append(append([]string{}, o.ClaudeResumeArgv...), pn.Restore.ClaudeSession)))), "")
 				}
 			}
 			plan.tmux(sess.Name, fmt.Sprintf("select-pane -t %s", tmuxQuote(fmt.Sprintf("%s.%d", target, activePane))), "")

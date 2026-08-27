@@ -97,12 +97,21 @@ func realTmuxBindings(cfg config.Config) func() (string, error) {
 }
 
 func realSetupEnv(cfg config.Config, stdout io.Writer) setup.Env {
-	return setup.Env{
+	env := setup.Env{
 		ConfigHome:   defaultConfigHome(),
 		Systemctl:    realSystemctl,
 		TmuxBindings: realTmuxBindings(cfg),
 		Stdout:       stdout,
 	}
+	// Best-effort: without a resolvable home/binary the link simply isn't
+	// managed (EnsureClaudeResumeLink no-ops with a note).
+	if home, err := os.UserHomeDir(); err == nil {
+		env.ClaudeResumeLink = filepath.Join(home, "bin", "claude-resume")
+	}
+	if bin, err := resolveBinary(); err == nil {
+		env.Binary = bin
+	}
+	return env
 }
 
 // loadSetupCfg loads and validates the config file at cfgPath, the same way

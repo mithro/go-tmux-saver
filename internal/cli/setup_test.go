@@ -302,7 +302,12 @@ func TestSetupValidateJSON(t *testing.T) {
 	}
 
 	// (1) Nothing installed at all: ok=false, one "missing" drift per file.
+	// HOME is hermetic too: validate now checks ~/bin/claude-resume, which
+	// must never observe (or, in install/update tests, rewrite) the real
+	// user's link.
 	withFakeExecCommand(t, healthyFakeExec)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	cfgPath := writeConfig(t, "{}")
 
@@ -335,6 +340,22 @@ func TestSetupValidateJSON(t *testing.T) {
 	}
 
 	// (2) Everything installed and healthy: ok=true, empty drifts, exit 0.
+	// "Healthy" now includes ~/bin/claude-resume pointing at this (the
+	// test) binary — created here the same way setup install would.
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	realExe, err := filepath.EvalSymlinks(exe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realExe, filepath.Join(home, "bin", "claude-resume")); err != nil {
+		t.Fatal(err)
+	}
 	configHome := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", configHome)
 	out.Reset()

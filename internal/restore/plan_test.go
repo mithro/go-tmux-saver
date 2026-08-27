@@ -38,7 +38,7 @@ func TestIsSeedOnly(t *testing.T) {
 func TestPlanOnSeedServer(t *testing.T) {
 	t.Setenv("HOME", "/home/tim")
 	live := LiveState{Sessions: map[string][]LiveWindow{"default": {{0, "h"}}}}
-	p := BuildPlan(live, snapNet(), Options{ClaudeResumePath: "/home/tim/bin/claude-resume", Contents: true, SeedSession: "default", SeedWindow: "h"})
+	p := BuildPlan(live, snapNet(), Options{ClaudeResumeArgv: []string{"/home/tim/bin/claude-resume"}, Contents: true, SeedSession: "default", SeedWindow: "h"})
 	cmds := strings.Join(flatten(p), "\n")
 	for _, want := range []string{
 		`new-window -d -t "=default:1" -n "rcfiles" -c "/tmp"`,
@@ -89,12 +89,12 @@ func TestPlanSkipsRelocationWhenSameNameExistsElsewhere(t *testing.T) {
 	}
 	found := false
 	for _, a := range p.Actions {
-		if a.Kind == "note" && a.Note == "present at index 7" {
+		if a.Kind == "note" && a.Note == `default "rcfiles" present at index 7` {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatalf("expected a %q skip note, actions: %+v", "present at index 7", p.Actions)
+		t.Fatalf("expected a %q skip note, actions: %+v", `default "rcfiles" present at index 7`, p.Actions)
 	}
 	// default:0 "h" (already-present skip) + default:1 "rcfiles" (present
 	// elsewhere skip) = 2 skipped; net:0 "swcfg" is still created fresh.

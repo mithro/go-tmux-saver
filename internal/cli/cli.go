@@ -4,6 +4,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"path/filepath"
 )
 
 // Version is set at build time via -ldflags "-X .../internal/cli.Version=v1.2".
@@ -31,6 +32,17 @@ func usage(w io.Writer) {
 	for _, c := range commands {
 		fmt.Fprintf(w, "  %-18s %s\n", c.name, c.help)
 	}
+}
+
+// RunMultiCall dispatches by the invoked name first (busybox-style):
+// installed as a `claude-resume` symlink (setup manages ~/bin/claude-resume
+// → this binary), the binary IS the placeholder — argv becomes
+// `claude-resume <args...>` — otherwise it behaves exactly like Run.
+func RunMultiCall(argv0 string, args []string, stdout, stderr io.Writer) int {
+	if filepath.Base(argv0) == "claude-resume" {
+		return Run(append([]string{"claude-resume"}, args...), stdout, stderr)
+	}
+	return Run(args, stdout, stderr)
 }
 
 // Run dispatches args[0] to a registered subcommand and returns the exit code.

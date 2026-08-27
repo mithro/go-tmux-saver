@@ -67,6 +67,45 @@ split. Off by default; normal output is unchanged.
   go-tmux-saver restore --merge      # default: restore additively into whatever is live now
   ```
 
+  **Previewing and test restores.** Two ways to see what a restore would do
+  without risking the real server:
+  ```sh
+  # Print the exact planned tmux commands, replays and skips — nothing runs:
+  go-tmux-saver restore --dry-run
+
+  # Full test restore into a DISPOSABLE tmux server on a separate socket
+  # (started automatically with -f /dev/null, so none of your tmux config,
+  # plugins or hooks run there; the configured socket is never touched):
+  go-tmux-saver restore --sandbox try1
+  tmux -L try1 attach        # inspect the restored layout, scrollback, panes
+  tmux -L try1 kill-server   # discard the sandbox when done
+  ```
+  Both accept `--snapshot <dir>` to test a specific snapshot instead of
+  `last`, and `--no-contents` to skip scrollback replay. Note a sandbox
+  restore is a REAL restore into that server: allowlisted commands (ssh,
+  editors, …) are relaunched in its panes and Claude panes get their
+  claude-resume placeholder — kill the sandbox server to end them.
+
+- **`claude-resume [session-id]`** — the built-in placeholder a restore
+  types into each saved Claude pane. It shows which conversation the pane
+  held (project, branch, one-line summary, last-active time, read from the
+  session's transcript) and waits: **Enter** resumes (`exec claude --resume
+  <id>`, run from the session's original launch directory so Claude finds
+  the project), **Ctrl-C** leaves a shell. With no/an unrecognised id it
+  falls back to plain `claude` (the resume picker). When stdin is not a
+  terminal it announces and resumes immediately instead of blocking. A pane
+  still sitting at the placeholder saves back as the same Claude pane.
+
+  `setup install`/`update` also manage **`~/bin/claude-resume`** as a
+  symlink to this binary (invoked by that name, the binary IS the
+  placeholder — busybox-style), so old resurrect saves and muscle memory
+  keep working. The link is only created when absent, and only ever
+  REPLACES a broken symlink, a symlink to an old go-tmux-saver binary, or
+  the known rcfiles claude-resume script (by content checksum — plain or
+  symlinked); an unknown script/binary or a symlink to a different tool is
+  left strictly alone (reported at install time, and never counted as
+  validate drift).
+
 - **`status`** — last save time, recent events, timer state, data dir.
   ```sh
   go-tmux-saver status
@@ -150,7 +189,7 @@ generate` prints.
 | `retention.daily_days` | `30` | days over which one snapshot per day is kept beyond `keep` |
 | `retention.rejected` | `20` | rejected snapshots kept |
 | `mail_to` | `$USER` | recipient for failure/recovery alerts (via `sendmail -t`) |
-| `claude_resume_path` | `~/bin/claude-resume` | helper used to relaunch a Claude session in a restored pane |
+| `claude_resume_path` | `""` (built-in) | command typed into restored Claude panes. Empty = the binary's own `claude-resume` subcommand (no extra script needed); set a path to use an external helper instead |
 
 The data directory is derived, not configurable in the file — use
 `--data-dir` or `$XDG_DATA_HOME`.

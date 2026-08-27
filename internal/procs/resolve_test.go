@@ -47,3 +47,17 @@ func TestResolveStaleRegistryFallsThrough(t *testing.T) {
 		t.Fatalf("stale registry should fall through to the cmdline --resume rule: %+v", r)
 	}
 }
+
+// TestResolveBuiltinPlaceholder: a pane sitting at the BUILT-IN placeholder
+// (`go-tmux-saver claude-resume <sid>` — no external script) must resolve
+// back to a claude pane with that session id, so a save taken while the
+// user hasn't pressed Enter yet round-trips the pane instead of demoting it
+// to a plain shell.
+func TestResolveBuiltinPlaceholder(t *testing.T) {
+	tb, _ := Scan("testdata/proc")
+	reg := ClaudeRegistry{Dir: "testdata/sessions"}
+	r := Resolve(tb, reg, 700, DefaultAllowlist)
+	if r.Kind != "claude" || r.ClaudeSession != "cccccccc-dddd-eeee-ffff-000000000000" {
+		t.Fatalf("built-in placeholder should resolve as claude: %+v", r)
+	}
+}
