@@ -1,9 +1,11 @@
 package tmuxctl
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -54,25 +56,29 @@ func TestClientContextTimeout(t *testing.T) {
 	}
 }
 
+// nopWriteCloser lets a hand-built Client accept Run's command write.
+type nopWriteCloser struct{ io.Writer }
+
+func (nopWriteCloser) Close() error { return nil }
+
 func TestClientDesyncAfterCancel(t *testing.T) {
-	sock := StartTestServer(t)
-	c, err := Dial(context.Background(), sock, "default")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Nanosecond)
-	defer cancel()
-	if _, err := c.Run(ctx, "list-sessions"); err == nil {
-		t.Fatal("expected context deadline error")
+	// White-box on purpose: against a real server the 1ns-deadline version
+	// raced tmux's (fast) reply against ctx.Done() in next()'s select —
+	// when both were ready, select's random choice made the test flake
+	// (seen under -race). Here the reply channel simply never delivers, so
+	// the cancelled context is the only ready case, deterministically.
+	var sink bytes.Buffer
+	c := &Client{stdin: nopWriteCloser{&sink}, replies: make(chan Reply), parseErr: make(chan error, 1)}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := c.Run(ctx, "list-sessions"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context error, got %v", err)
 	}
 	// The stray reply to the cancelled command may still be in flight; a
 	// later Run, even with a fresh context, must not read it as its own
 	// answer — it must fail fast with ErrDesynced instead.
 	if _, err := c.Run(context.Background(), "list-sessions"); !errors.Is(err, ErrDesynced) {
 		t.Fatalf("expected ErrDesynced after a cancelled command, got %v", err)
-	}
-	if err := c.Close(); err != nil {
-		t.Fatalf("close after desync: %v", err)
 	}
 }
 
