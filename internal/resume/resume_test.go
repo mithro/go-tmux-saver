@@ -149,6 +149,112 @@ func TestDecideJunkSidFallsBackToPicker(t *testing.T) {
 	}
 }
 
+// TestChdirTargetWorktreeShapes covers issue #17: the resume-time chdir
+// must land in the session's LAUNCH directory across the worktree layouts
+// in real use. `claude --resume` is project-scoped by the CURRENT dir's
+// munged name, so resuming from the wrong place loses the session.
+func TestChdirTargetWorktreeShapes(t *testing.T) {
+	sid2 := "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+	mk := func(t *testing.T, launch, work string) (Meta, string) {
+		t.Helper()
+		projects := t.TempDir()
+		dir := filepath.Join(projects, Munge(launch))
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		lines := `{"type":"user","cwd":"` + launch + `","timestamp":"2026-08-27T01:00:00Z"}` + "\n"
+		if work != "" {
+			lines += `{"type":"assistant","cwd":"` + work + `","timestamp":"2026-08-27T02:00:00Z"}` + "\n"
+		}
+		tr := filepath.Join(dir, sid2+".jsonl")
+		if err := os.WriteFile(tr, []byte(lines), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		m, ok := ReadMeta(tr)
+		if !ok {
+			t.Fatal("ReadMeta")
+		}
+		return m, tr
+	}
+
+	root := t.TempDir()
+	main := filepath.Join(root, "repo")
+	for _, d := range []string{main, filepath.Join(main, ".worktrees", "feat")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 1. Launched in the main repo, work moved into a worktree INSIDE it:
+	// resume from the main repo (the launch cwd), never the worktree.
+	m, tr := mk(t, main, filepath.Join(main, ".worktrees", "feat"))
+	if got := ChdirTarget(m, tr); got != main {
+		t.Errorf("inner worktree: ChdirTarget = %q, want launch dir %q", got, main)
+	}
+
+	// 2. Launched IN the inner worktree: the worktree IS the project.
+	wt := filepath.Join(main, ".worktrees", "feat")
+	m, tr = mk(t, wt, "")
+	if got := ChdirTarget(m, tr); got != wt {
+		t.Errorf("launched-in-worktree: ChdirTarget = %q, want %q", got, wt)
+	}
+
+	// 3. Global worktree directory (superpowers-style).
+	global := filepath.Join(root, ".config", "superpowers", "worktrees", "repo-feat")
+	if err := os.MkdirAll(global, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m, tr = mk(t, global, "")
+	if got := ChdirTarget(m, tr); got != global {
+		t.Errorf("global worktree: ChdirTarget = %q, want %q", got, global)
+	}
+
+	// 4. Side-by-side worktree (repo-wt next to repo) — and its munge is a
+	// near-collision with a subdir spelling; the launch cwd from the
+	// transcript must win exactly.
+	side := filepath.Join(root, "repo-wt")
+	collider := filepath.Join(root, "repo", "wt") // munge(root/repo/wt) == munge(root/repo-wt)
+	for _, d := range []string{side, collider} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if Munge(side) != Munge(collider) {
+		t.Fatalf("test premise broken: %q vs %q", Munge(side), Munge(collider))
+	}
+	m, tr = mk(t, side, "")
+	if got := ChdirTarget(m, tr); got != side {
+		t.Errorf("side-by-side: ChdirTarget = %q, want %q (not the munge-colliding %q)", got, side, collider)
+	}
+
+	// 5. Launch dir deleted after saving: no chdir, resume still attempted.
+	gone := filepath.Join(root, "deleted-repo")
+	if err := os.MkdirAll(gone, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	m, tr = mk(t, gone, "")
+	if err := os.Remove(gone); err != nil {
+		t.Fatal(err)
+	}
+	if got := ChdirTarget(m, tr); got != "" {
+		t.Errorf("deleted launch dir: ChdirTarget = %q, want none", got)
+	}
+	var out bytes.Buffer
+	// Decide still resolves to a resume (non-tty announce path).
+	projects := filepath.Dir(filepath.Dir(tr))
+	d := Decide(&out, root, projects, sid2, false, false, nil)
+	if d.Skip || len(d.Argv) != 3 || d.Chdir != "" {
+		t.Errorf("deleted launch dir: decision = %+v, want resume with no chdir", d)
+	}
+
+	// 6. Pane recreated in a different cwd: Decide's Chdir (the launch dir)
+	// is authoritative — the caller chdirs regardless of where the pane is.
+	m, tr = mk(t, main, "")
+	if got := ChdirTarget(m, tr); got != main {
+		t.Errorf("pane-cwd-independent: ChdirTarget = %q, want %q", got, main)
+	}
+}
+
 func TestTailLines(t *testing.T) {
 	data := []byte("a\nb\nc\nd\n")
 	if got := string(TailLines(data, 2)); got != "c\nd\n" {
