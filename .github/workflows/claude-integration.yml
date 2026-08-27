@@ -3,10 +3,11 @@
 # next/latest release (npm dist-tags `stable` and `latest` of
 # @anthropic-ai/claude-code).
 #
-# Claude needs credentials to reach its idle prompt, so the whole matrix is
-# gated on the CLAUDE_CODE_OAUTH_TOKEN repository secret (mint one with
-# `claude setup-token`). Without it the jobs SKIP LOUDLY — a warning
-# annotation on every run, never a silently-green pretend-pass.
+# NO credentials are needed: Claude is pointed at ci/fake_anthropic.py via
+# ANTHROPIC_BASE_URL with a dummy ANTHROPIC_API_KEY, inside a fresh $HOME.
+# The API's answers must not matter to suspend/resume — the test asserts
+# the full lifecycle against canned mock responses and reports any request
+# that arrives. Runs everywhere, forks included.
 name: claude-integration
 
 on:
@@ -28,36 +29,20 @@ jobs:
       fail-fast: false
       matrix:
         channel: [stable, latest]
-    env:
-      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
     steps:
-      - name: Gate on credentials
-        id: gate
-        run: |
-          if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
-            echo "::warning title=claude-integration skipped::CLAUDE_CODE_OAUTH_TOKEN secret is not set — the real-Claude integration matrix did NOT run. Mint one with 'claude setup-token' and add it as a repository secret."
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
-          fi
       - uses: actions/checkout@v4
-        if: steps.gate.outputs.skip != 'true'
       - uses: actions/setup-go@v5
-        if: steps.gate.outputs.skip != 'true'
         with:
           go-version-file: go.mod
       - name: Install tmux and Claude Code (${{ matrix.channel }})
-        if: steps.gate.outputs.skip != 'true'
         run: |
           set -euo pipefail
           sudo apt-get update && sudo apt-get install -y tmux
           npm install -g "@anthropic-ai/claude-code@${{ matrix.channel }}"
           claude --version
       - name: Build go-tmux-saver
-        if: steps.gate.outputs.skip != 'true'
         run: go build -o /tmp/go-tmux-saver ./cmd/go-tmux-saver
-      - name: Run the suspend/resume integration test
-        if: steps.gate.outputs.skip != 'true'
+      - name: Run the suspend/resume integration test (fake API, no credentials)
         env:
           GTS_BIN: /tmp/go-tmux-saver
           GTS_TEST_DIR: ${{ runner.temp }}
