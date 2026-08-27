@@ -642,10 +642,15 @@ func TestRestoreCLISandboxRefusesConfiguredSocket(t *testing.T) {
 // left at its default (empty), the plan's Claude panes type this binary's
 // own `claude-resume` subcommand — no external script needed on the host.
 func TestRunRestoreDefaultUsesBuiltinClaudeResume(t *testing.T) {
-	if got := claudeResumeArgv(""); len(got) != 2 || got[1] != "claude-resume" || !strings.Contains(got[0], string(os.PathSeparator)) {
+	got, suffix := claudeResumeArgv("")
+	if len(got) != 2 || got[1] != "claude-resume" || !strings.Contains(got[0], string(os.PathSeparator)) {
 		t.Fatalf("builtin argv = %q, want [<this-binary> claude-resume]", got)
 	}
-	if got := claudeResumeArgv("~/bin/claude-resume"); len(got) != 1 || strings.Contains(got[0], "~") {
-		t.Fatalf("external argv = %q, want the tilde-expanded script path alone", got)
+	if len(suffix) != 1 || suffix[0] != "--no-saved" {
+		t.Fatalf("builtin suffix = %q, want [--no-saved] (restore already replayed the console state)", suffix)
+	}
+	got, suffix = claudeResumeArgv("~/bin/claude-resume")
+	if len(got) != 1 || strings.Contains(got[0], "~") || len(suffix) != 0 {
+		t.Fatalf("external argv = %q suffix = %q, want the tilde-expanded script path alone", got, suffix)
 	}
 }

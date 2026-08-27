@@ -39,15 +39,17 @@ func expandHome(p string) string {
 // an explicitly configured script path (claude_resume_path), or — the
 // default, empty — this very binary's built-in `claude-resume` subcommand,
 // so rollout hosts need no extra script.
-func claudeResumeArgv(cfgPath string) []string {
+func claudeResumeArgv(cfgPath string) (argv, suffix []string) {
 	if cfgPath != "" {
-		return []string{expandHome(cfgPath)}
+		return []string{expandHome(cfgPath)}, nil
 	}
 	exe, err := os.Executable()
 	if err != nil {
 		exe = "go-tmux-saver" // resolvable via PATH in the pane's shell
 	}
-	return []string{exe, "claude-resume"}
+	// --no-saved: a restored pane's console state was already reproduced by
+	// the cat replay — the built-in placeholder must not print it twice.
+	return []string{exe, "claude-resume"}, []string{"--no-saved"}
 }
 
 // RestoreDeps bundles everything RunRestore needs, so it can be driven by
@@ -196,11 +198,12 @@ func RunRestore(ctx context.Context, d RestoreDeps) (RestoreOutcome, error) {
 		contentsFn = func(string) ([]byte, bool) { return nil, false }
 	}
 
+	resumeArgv, resumeSuffix := claudeResumeArgv(d.Cfg.ClaudeResumePath)
 	opts := restore.Options{
-		ClaudeResumeArgv: claudeResumeArgv(d.Cfg.ClaudeResumePath),
-		Contents:         contentsEnabled,
-		SeedSession:      d.Cfg.SeedSession,
-		SeedWindow:       d.Cfg.SeedWindow,
+		ClaudeResumeArgv: resumeArgv, ClaudeResumeSuffix: resumeSuffix,
+		Contents:    contentsEnabled,
+		SeedSession: d.Cfg.SeedSession,
+		SeedWindow:  d.Cfg.SeedWindow,
 	}
 	plan := restore.BuildPlan(live, snap, opts)
 

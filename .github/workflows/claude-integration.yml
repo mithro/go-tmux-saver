@@ -1,0 +1,49 @@
+# Full integration test of claude-suspend / claude-resume against the REAL
+# Claude Code binary (issue #23), on the current stable release and the
+# next/latest release (npm dist-tags `stable` and `latest` of
+# @anthropic-ai/claude-code).
+#
+# NO credentials are needed: Claude is pointed at ci/fake_anthropic.py via
+# ANTHROPIC_BASE_URL with a dummy ANTHROPIC_API_KEY, inside a fresh $HOME.
+# The API's answers must not matter to suspend/resume — the test asserts
+# the full lifecycle against canned mock responses and reports any request
+# that arrives. Runs everywhere, forks included.
+name: claude-integration
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * 1" # weekly: catch new Claude releases breaking us
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [stable, latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install tmux and Claude Code (${{ matrix.channel }})
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y tmux
+          npm install -g "@anthropic-ai/claude-code@${{ matrix.channel }}"
+          claude --version
+      - name: Build go-tmux-saver
+        run: go build -o /tmp/go-tmux-saver ./cmd/go-tmux-saver
+      - name: Run the suspend/resume integration test (fake API, no credentials)
+        env:
+          GTS_BIN: /tmp/go-tmux-saver
+          GTS_TEST_DIR: ${{ runner.temp }}
+        run: python3 ci/claude_integration_test.py
