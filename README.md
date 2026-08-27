@@ -86,39 +86,18 @@ split. Off by default; normal output is unchanged.
   editors, …) are relaunched in its panes and Claude panes get their
   claude-resume placeholder — kill the sandbox server to end them.
 
-- **`claude-resume [session-id]`** — the built-in placeholder a restore
-  types into each saved Claude pane. It shows which conversation the pane
-  held (project, branch, one-line summary, last-active time, read from the
-  session's transcript) and waits: **Enter** resumes (`exec claude --resume
-  <id>`, run from the session's original launch directory so Claude finds
-  the project), **Ctrl-C** leaves a shell. With no/an unrecognised id it
-  falls back to plain `claude` (the resume picker). When stdin is not a
-  terminal it announces and resumes immediately instead of blocking. A pane
-  still sitting at the placeholder saves back as the same Claude pane.
-
-  `setup install`/`update` also manage **`~/bin/claude-resume`** as a
-  symlink to this binary (invoked by that name, the binary IS the
-  placeholder — busybox-style), so old resurrect saves and muscle memory
-  keep working. The link is only created when absent, and only ever
-  REPLACES a broken symlink, a symlink to an old go-tmux-saver binary, or
-  the known rcfiles claude-resume script (by content checksum — plain or
-  symlinked); an unknown script/binary or a symlink to a different tool is
-  left strictly alone (reported at install time, and never counted as
-  validate drift).
-
-- **`claude-suspend`** — park RUNNING Claude session(s) behind the
-  placeholder: capture the pane's scrollback, type `/exit`, confirm the
-  Claude process actually exited (bounded wait, `--exit-timeout`), then
-  type `claude-resume <id> --saved-output <capture>` into the pane — so the
-  console state survives and Enter brings the session straight back.
-  ```sh
-  claude-suspend 5            # window 5 of the session group you're in
-  claude-suspend rcfiles      # window by name (current session group)
-  claude-suspend default 5    # explicit session group + window
-  claude-suspend --all        # every Claude session on the whole server
-  ```
-  Panes not running Claude are skipped; a Claude that won't exit is
-  reported and left running, never force-killed.
+- **Claude Code integration** — panes running [Claude
+  Code](https://claude.com/claude-code) are saved as *which conversation
+  they held* (detected via `/proc` + Claude's own session registry, id
+  only — never transcript content). A restore types a confirm-first
+  **`claude-resume`** placeholder into each such pane (project, branch and
+  a one-line summary above an Enter-to-resume prompt — no stampede of N
+  relaunched Claudes), and **`claude-suspend`** parks a *running* session
+  behind that same placeholder on demand (`/exit`, confirm, re-type).
+  `setup` manages `~/bin/claude-resume` as a symlink to the binary so the
+  historical name keeps working with no external script. Full details,
+  target forms, the symlink's strict replace-only-known rules, worktree
+  behaviour and screenshots: **[docs/claude-integration.md](docs/claude-integration.md)**.
 
 - **`status`** — last save time, recent events, timer state, data dir.
   ```sh
