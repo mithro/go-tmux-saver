@@ -106,6 +106,20 @@ split. Off by default; normal output is unchanged.
   left strictly alone (reported at install time, and never counted as
   validate drift).
 
+- **`claude-suspend`** — park RUNNING Claude session(s) behind the
+  placeholder: capture the pane's scrollback, type `/exit`, confirm the
+  Claude process actually exited (bounded wait, `--exit-timeout`), then
+  type `claude-resume <id> --saved-output <capture>` into the pane — so the
+  console state survives and Enter brings the session straight back.
+  ```sh
+  claude-suspend 5            # window 5 of the session group you're in
+  claude-suspend rcfiles      # window by name (current session group)
+  claude-suspend default 5    # explicit session group + window
+  claude-suspend --all        # every Claude session on the whole server
+  ```
+  Panes not running Claude are skipped; a Claude that won't exit is
+  reported and left running, never force-killed.
+
 - **`status`** — last save time, recent events, timer state, data dir.
   ```sh
   go-tmux-saver status

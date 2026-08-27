@@ -39,8 +39,9 @@ func usage(w io.Writer) {
 // → this binary), the binary IS the placeholder — argv becomes
 // `claude-resume <args...>` — otherwise it behaves exactly like Run.
 func RunMultiCall(argv0 string, args []string, stdout, stderr io.Writer) int {
-	if filepath.Base(argv0) == "claude-resume" {
-		return Run(append([]string{"claude-resume"}, args...), stdout, stderr)
+	switch filepath.Base(argv0) {
+	case "claude-resume", "claude-suspend":
+		return Run(append([]string{filepath.Base(argv0)}, args...), stdout, stderr)
 	}
 	return Run(args, stdout, stderr)
 }
