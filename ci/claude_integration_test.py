@@ -1,33 +1,45 @@
 #!/usr/bin/env python3
 """End-to-end integration test of claude-suspend / claude-resume against a
-REAL Claude Code binary (issue #23).
+REAL Claude Code binary — with NO credentials and NO network (issue #23).
 
-Flow: start Claude in a tmux window → wait for its prompt (answering any
-first-run trust/onboarding dialogs) → `go-tmux-saver claude-suspend` it →
-assert the /exit-confirm-placeholder round-trip, the saved-output capture,
-and that a `save` records the same session id → press Enter on the
-placeholder → assert Claude relaunches → suspend again to leave everything
-parked, then tear the server down.
+Claude is pointed at ci/fake_anthropic.py via ANTHROPIC_BASE_URL with a
+dummy ANTHROPIC_API_KEY, inside a fresh $HOME pre-seeded to skip
+onboarding. Probing showed Claude Code makes zero API requests across this
+whole lifecycle (start → idle → /exit → --resume), so the fake server is a
+safety net, and the suspend/resume functionality under test is asserted to
+work regardless of what the API returns; any request that does arrive is
+logged and reported.
 
-Requirements: tmux, a `claude` binary on PATH, credentials in the
-environment (CLAUDE_CODE_OAUTH_TOKEN or an already-authenticated
-~/.claude), and GTS_BIN pointing at the go-tmux-saver build under test.
-Stdlib only — CI runs it with a plain python3.
+Flow: start Claude in a tmux window → wait for its prompt (answering the
+folder-trust dialog) → `go-tmux-saver claude-suspend` it → assert the
+/exit-confirm-placeholder round-trip, the saved-output capture, and that a
+`save` records the same session id → press Enter on the placeholder →
+assert Claude relaunches → suspend again, then tear the server down.
+
+Requirements: tmux, a `claude` binary on PATH, GTS_BIN pointing at the
+go-tmux-saver build under test. Stdlib only.
 """
 import json
 import os
-import re
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+import fake_anthropic
+
 SOCK = os.environ.get("GTS_TEST_SOCKET", f"gts-ci-{os.getpid()}")
 GTS = os.environ["GTS_BIN"]
-HOME = Path(os.environ["HOME"])
 DEADLINE = float(os.environ.get("GTS_TEST_TIMEOUT", "120"))
+DUMMY_KEY = "sk-ant-api03-" + "m" * 80 + "-mockmockAA"
 
-UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+WORK = Path(os.environ.get("GTS_TEST_DIR", "/tmp")) / f"gts-ci-{os.getpid()}"
+HOME = WORK / "home"          # fresh: never the runner's real ~/.claude
+PROJ = HOME / "demo-project"  # NOT nested in any repo: claude walks parent
+                              # dirs for project config/trust state
+DATA = WORK / "store"
+CFG = WORK / "config.json"
+API_LOG = WORK / "fake-api-requests.log"
 
 
 def log(msg):
@@ -43,11 +55,12 @@ def tmux(*args, check=True):
 
 
 def gts(cmd, *rest):
-    # Flags before positionals: the subcommands use stdlib flag parsing,
-    # which stops at the first non-flag argument.
+    # Flags before positionals (stdlib flag parsing); HOME is the fresh one
+    # so the suspend's registry lookup sees the same world as the pane.
     return subprocess.run([GTS, cmd, "--socket", SOCK,
                            "--config", str(CFG), "--data-dir", str(DATA), *rest],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True,
+                          env={**os.environ, "HOME": str(HOME)})
 
 
 def pane_text(target="=default:1"):
@@ -66,45 +79,56 @@ def wait_for(desc, pred, timeout=DEADLINE, interval=0.5):
 
 
 def claude_pids():
-    """Live processes with comm 'claude' under this test's pane."""
     out = subprocess.run(["pgrep", "-x", "claude"], capture_output=True, text=True)
     return [int(p) for p in out.stdout.split()]
 
 
 def answer_dialogs():
-    """Answer Claude's first-run dialogs (trust folder / theme) with Enter
-    until the input box appears. Returns True once the prompt is up."""
+    """Answer Claude's first-run dialogs with Enter until the input prompt
+    appears. Dialogs are checked FIRST, and a bare ❯ is never treated as
+    the ready signal: selection dialogs draw ❯ as their cursor arrow, so
+    matching it as "prompt ready" leaves the trust dialog unanswered
+    forever. Ready = the status-line hints of either UI generation."""
     text = pane_text()
-    # Input-prompt markers across Claude UI generations: the boxed prompt
-    # (╭), the bare chevron prompt (❯), and the shortcut/status hints.
-    if any(m in text for m in ("╭", "❯", "? for shortcuts", "⏵⏵")):
-        return True
-    for marker in ("Do you trust", "Choose the text style", "to continue"):
+    for marker in ("trust this folder", "Do you trust",
+                   "Choose the text style", "to continue"):
         if marker in text:
             log(f"answering dialog: {marker!r}")
             tmux("send-keys", "-t", "=default:1", "Enter")
-            break
-    return False
+            return False
+    return any(m in text for m in ("? for shortcuts", "⏵⏵", "╭"))
 
 
 def main():
-    global CFG, DATA
-    work = Path(os.environ.get("GTS_TEST_DIR", "/tmp")) / f"gts-ci-{os.getpid()}"
-    proj = work / "demo-project"
-    proj.mkdir(parents=True)
-    (proj / "README.md").write_text("integration-test scratch project\n")
-    DATA = work / "store"
-    CFG = work / "config.json"
+    PROJ.mkdir(parents=True)
+    (PROJ / "README.md").write_text("integration-test scratch project\n")
+    DATA.mkdir()
     CFG.write_text(json.dumps({"socket": SOCK, "seed_session": "default",
                                "seed_window": "h"}))
+    # Skip onboarding and the use-this-API-key dialog (probe-verified fields).
+    (HOME / ".claude.json").write_text(json.dumps({
+        "hasCompletedOnboarding": True,
+        "theme": "dark",
+        "customApiKeyResponses": {"approved": [DUMMY_KEY[-20:]], "rejected": []},
+    }))
+
+    port = fake_anthropic.serve(log_path=str(API_LOG))
+    log(f"fake Anthropic API on 127.0.0.1:{port}")
 
     ver = subprocess.run(["claude", "--version"], capture_output=True, text=True)
     log(f"claude version: {ver.stdout.strip() or ver.stderr.strip()}")
 
+    env_line = (f"HOME={HOME} ANTHROPIC_BASE_URL=http://127.0.0.1:{port} "
+                f"ANTHROPIC_API_KEY={DUMMY_KEY} "
+                f"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 "
+                f"DISABLE_AUTOUPDATER=1 DISABLE_TELEMETRY=1 "
+                f"PATH={os.environ['PATH']}")
+
     before = set(claude_pids())
     tmux("new-session", "-d", "-x", "200", "-y", "50", "-s", "default", "-n", "h",
          "tail -f /dev/null")
-    tmux("new-window", "-d", "-t", "=default:1", "-n", "claudewin", "-c", str(proj))
+    tmux("new-window", "-d", "-t", "=default:1", "-n", "claudewin", "-c", str(PROJ),
+         f"env {env_line} bash --norc --noprofile")
     tmux("send-keys", "-t", "=default:1", " claude", "Enter")
 
     try:
@@ -117,14 +141,25 @@ def main():
                                 if reg.exists() else None))
         log(f"claude pid={pid} sid={sid[:8]}…")
 
+        # A conversation must EXIST for `claude --resume` to find it: a
+        # never-messaged session has no transcript on disk and resume
+        # correctly reports "No conversation found". Sending one message
+        # also drives a real request into the fake API — whose canned
+        # answer (or any answer) must not matter to suspend/resume.
+        tmux("send-keys", "-t", "=default:1",
+             "hello from the go-tmux-saver integration test", "Enter")
+        transcript_glob = HOME / ".claude" / "projects"
+        wait_for("transcript persisted",
+                 lambda: list(transcript_glob.glob(f"*/{sid}.jsonl")))
+        time.sleep(2)  # let the (mock) response round-trip settle
+
         # ── suspend ──
         r = gts("claude-suspend", "default", "1")
         log(f"claude-suspend rc={r.returncode}\n{r.stdout}{r.stderr}")
         if r.returncode != 0 or "suspended 1, failed 0" not in r.stdout:
             sys.exit("claude-suspend did not report success")
         wait_for("claude process gone", lambda: pid not in claude_pids())
-        wait_for("placeholder banner",
-                 lambda: "Enter = resume" in pane_text())
+        wait_for("placeholder banner", lambda: "Enter = resume" in pane_text())
         if sid[:8] not in pane_text():
             sys.exit(f"banner does not show the session id\n{pane_text()}")
         captures = list((DATA / "suspend").glob("*.txt"))
@@ -147,6 +182,7 @@ def main():
         tmux("send-keys", "-t", "=default:1", "Enter")
         pid2 = wait_for("claude relaunched",
                         lambda: next(iter(set(claude_pids()) - before2), None))
+
         # Readiness must look at the BOTTOM of the pane: the placeholder's
         # old banner (with its own prompt markers) is still on screen until
         # claude's TUI redraws, so a whole-pane match returns instantly and
@@ -168,7 +204,17 @@ def main():
                 sys.exit("re-suspend failed twice")
             time.sleep(5)
         wait_for("claude gone again", lambda: pid2 not in claude_pids())
-        log("PASS: full suspend → save → resume → suspend cycle")
+
+        # ── the API must not have mattered ──
+        reqs = API_LOG.read_text() if API_LOG.exists() else ""
+        if reqs:
+            log(f"NOTE: claude made API request(s) — functionality above "
+                f"passed regardless:\n{reqs}")
+        else:
+            log("fake API received ZERO requests — suspend/resume has no "
+                "API dependency")
+        log("PASS: full suspend → save → resume → suspend cycle "
+            "(no credentials, no real API)")
     finally:
         tmux("kill-server", check=False)
 
