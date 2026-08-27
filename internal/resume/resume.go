@@ -266,3 +266,27 @@ func Decide(w io.Writer, home, projectsDir, sid string, stdoutTTY, stdinTTY bool
 	}
 	return Decision{Argv: argv, Chdir: chdir}
 }
+
+// TailLines returns the last n lines of data (n <= 0 returns data
+// unchanged) — the placeholder prints only the tail of a pane's saved
+// scrollback, enough to reproduce the visible console state without
+// replaying megabytes of history.
+func TailLines(data []byte, n int) []byte {
+	if n <= 0 || len(data) == 0 {
+		return data
+	}
+	end := len(data)
+	if data[end-1] == '\n' {
+		end--
+	}
+	seen := 0
+	for i := end - 1; i >= 0; i-- {
+		if data[i] == '\n' {
+			seen++
+			if seen == n {
+				return data[i+1:]
+			}
+		}
+	}
+	return data
+}
