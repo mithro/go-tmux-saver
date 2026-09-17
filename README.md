@@ -28,12 +28,19 @@ static binaries and `.deb`s, publishes a [GitHub Release](https://github.com/mit
 and refreshes the signed apt repository at <https://mith.ro/go-tmux-saver/>.
 
 ```sh
+sudo install -d -m0755 /etc/apt/keyrings
 curl -fsSL https://mith.ro/go-tmux-saver/go-tmux-saver.gpg \
   | sudo tee /etc/apt/keyrings/mithro-go-tmux-saver.gpg > /dev/null
-echo "deb [signed-by=/etc/apt/keyrings/mithro-go-tmux-saver.gpg] https://mith.ro/go-tmux-saver/ ./" \
+echo "deb [signed-by=/etc/apt/keyrings/mithro-go-tmux-saver.gpg] https://mith.ro/go-tmux-saver/trixie/ ./" \
   | sudo tee /etc/apt/sources.list.d/mithro-go-tmux-saver.list
 sudo apt update && sudo apt install go-tmux-saver
 ```
+
+Each suite is its own flat repository, so the URL must name one (`trixie/` or
+`sid/`) and keep the trailing `./`. The repository root carries no `Packages`
+file, so a source line pointing at it fails `apt update` with a 404. The two
+suites carry identical contents -- the package is static with no
+suite-specific dependencies -- so pick either on a derivative or newer Debian.
 
 The package installs only `/usr/bin/go-tmux-saver`; per-user units,
 keybindings and `config.json` are created by `go-tmux-saver setup install`.
