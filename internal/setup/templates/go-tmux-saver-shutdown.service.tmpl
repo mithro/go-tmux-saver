@@ -1,0 +1,30 @@
+{{.Header}}[Unit]
+Description=go-tmux-saver: snapshot tmux before the server stops
+Documentation=man:tmux(1)
+# Ordered After tmux-server.service, so on stop/shutdown this unit stops
+# BEFORE it — while the tmux server is still alive to snapshot. PartOf makes a
+# stop or restart of tmux-server.service pull this unit down too, so a
+# `systemctl stop`, a service restart, and a full system shutdown all fire the
+# pre-stop save. This is strictly additive: it never touches
+# tmux-server.service's own ExecStop (which kills the server), so no ordering
+# reset or coupling to how that unit stops is needed.
+After=tmux-server.service
+PartOf=tmux-server.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# A no-op start: the unit exists only for its ExecStop. RemainAfterExit keeps
+# it "active (exited)" after ExecStart so systemd runs ExecStop when it stops.
+ExecStart=/bin/true
+# The final save. `-` so a save failure never faults the unit (and so can
+# never block or fail shutdown); --auto makes a stopped/idle server a clean
+# skip rather than an error; --no-display avoids a status message no one is
+# there to read. TimeoutStopSec bounds a slow or hung save so it can neither
+# hang shutdown indefinitely nor be SIGKILLed so late that it matters
+# (snapshot writes are atomic regardless).
+ExecStop=-{{.Binary}} save --auto --no-display
+TimeoutStopSec=45
+
+[Install]
+WantedBy=default.target

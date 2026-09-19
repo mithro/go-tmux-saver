@@ -40,7 +40,9 @@ func Validate(env Env, files []Managed) []Drift {
 		}
 	}
 
-	for _, unit := range timerUnits {
+	// enabledUnits (the timers and the shutdown service) must all be enabled
+	// and active; validateTimerState is a generic is-enabled + is-active check.
+	for _, unit := range enabledUnits {
 		if d, ok := validateTimerState(env, unit); ok {
 			drifts = append(drifts, d)
 		}

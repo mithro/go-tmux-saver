@@ -12,6 +12,17 @@ import (
 // Update restarts.
 var timerUnits = []string{"go-tmux-saver.timer", "go-tmux-saver-watch.timer"}
 
+// shutdownUnit saves the tmux state at stop time. It is enabled/started like
+// the timers, but deliberately NOT in timerUnits: Update restarts timerUnits,
+// and restarting this unit would run its ExecStop — an unwanted save on every
+// `setup update`. Its ExecStop changes take effect after daemon-reload
+// without a restart anyway.
+const shutdownUnit = "go-tmux-saver-shutdown.service"
+
+// enabledUnits are the units Install `enable --now`s and Validate checks are
+// enabled+active: the timers plus the shutdown unit.
+var enabledUnits = append(append([]string{}, timerUnits...), shutdownUnit)
+
 // WriteFiles atomically writes each of files under dir (ConfigHome-relative
 // Rel paths), creating parent directories as needed (RULING R32: the
 // go-tmux-saver/ directory — which holds the 0600 config.json — is created
@@ -122,9 +133,9 @@ func Install(env Env, files []Managed) error {
 	if _, err := env.Systemctl("--user", "daemon-reload"); err != nil {
 		return fmt.Errorf("setup: daemon-reload: %w", err)
 	}
-	args := append([]string{"--user", "enable", "--now"}, timerUnits...)
+	args := append([]string{"--user", "enable", "--now"}, enabledUnits...)
 	if _, err := env.Systemctl(args...); err != nil {
-		return fmt.Errorf("setup: enable timers: %w", err)
+		return fmt.Errorf("setup: enable units: %w", err)
 	}
 	return ensureLinkAndReport(env, false)
 }

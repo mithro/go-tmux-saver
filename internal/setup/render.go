@@ -26,14 +26,15 @@ const Header = "# managed by go-tmux-saver %s — edit config.json, not this fil
 // Rel* are the ConfigHome-relative paths of the files Render produces, in
 // the same order Render returns them.
 const (
-	RelService      = "systemd/user/go-tmux-saver.service"
-	RelTimer        = "systemd/user/go-tmux-saver.timer"
-	RelWatchService = "systemd/user/go-tmux-saver-watch.service"
-	RelWatchTimer   = "systemd/user/go-tmux-saver-watch.timer"
-	RelAlertService = "systemd/user/go-tmux-saver-alert@.service"
-	RelTmuxDropin   = "systemd/user/tmux-server.service.d/50-go-tmux-saver.conf"
-	RelTmuxConf     = "go-tmux-saver/tmux.conf"
-	RelConfigJSON   = "go-tmux-saver/config.json"
+	RelService         = "systemd/user/go-tmux-saver.service"
+	RelTimer           = "systemd/user/go-tmux-saver.timer"
+	RelWatchService    = "systemd/user/go-tmux-saver-watch.service"
+	RelWatchTimer      = "systemd/user/go-tmux-saver-watch.timer"
+	RelShutdownService = "systemd/user/go-tmux-saver-shutdown.service"
+	RelAlertService    = "systemd/user/go-tmux-saver-alert@.service"
+	RelTmuxDropin      = "systemd/user/tmux-server.service.d/50-go-tmux-saver.conf"
+	RelTmuxConf        = "go-tmux-saver/tmux.conf"
+	RelConfigJSON      = "go-tmux-saver/config.json"
 )
 
 // unitMode and configMode are the modes Render assigns; Validate and
@@ -85,6 +86,7 @@ var specs = []tmplSpec{
 	{"go-tmux-saver.timer.tmpl", RelTimer, unitMode},
 	{"go-tmux-saver-watch.service.tmpl", RelWatchService, unitMode},
 	{"go-tmux-saver-watch.timer.tmpl", RelWatchTimer, unitMode},
+	{"go-tmux-saver-shutdown.service.tmpl", RelShutdownService, unitMode},
 	{"go-tmux-saver-alert@.service.tmpl", RelAlertService, unitMode},
 	{"tmux-server-dropin.conf.tmpl", RelTmuxDropin, unitMode},
 	{"tmux.conf.tmpl", RelTmuxConf, unitMode},
