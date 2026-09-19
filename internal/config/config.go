@@ -17,7 +17,9 @@ type Config struct {
 	SeedSession      string   `json:"seed_session"`       // "default"
 	SeedWindow       string   `json:"seed_window"`        // "h"
 	IntervalMinutes  int      `json:"interval_minutes"`   // 10
-	WatchStaleFactor int      `json:"watch_stale_factor"` // 3
+	WatchStaleFactor int      `json:"watch_stale_factor"` // 3 — email watchdog + status-line red tier
+	WarnStaleFactor  int      `json:"warn_stale_factor"`  // 2 — status-line yellow tier (red reuses watch_stale_factor)
+	StatusIndicator  bool     `json:"status_indicator"`   // true — show the in-tmux stale-save status-line indicator
 	Allowlist        []string `json:"allowlist"`
 	Guard            struct {
 		MinPanes int `json:"min_panes"`
@@ -45,6 +47,8 @@ func Default() Config {
 	c.SeedWindow = "h"
 	c.IntervalMinutes = 10
 	c.WatchStaleFactor = 3
+	c.WarnStaleFactor = 2
+	c.StatusIndicator = true
 	c.Allowlist = append([]string(nil), procs.DefaultAllowlist...)
 	c.Guard.MinPanes = 5
 	c.Guard.Divisor = 3
@@ -109,6 +113,9 @@ func Load(path string) (Config, error) {
 func (c Config) Validate() error {
 	if c.IntervalMinutes < 1 {
 		return fmt.Errorf("config: interval_minutes must be >= 1, got %d", c.IntervalMinutes)
+	}
+	if c.WarnStaleFactor < 1 {
+		return fmt.Errorf("config: warn_stale_factor must be >= 1, got %d", c.WarnStaleFactor)
 	}
 	if c.Guard.Divisor < 2 {
 		return fmt.Errorf("config: guard.divisor must be >= 2, got %d", c.Guard.Divisor)

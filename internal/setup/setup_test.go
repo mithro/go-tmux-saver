@@ -203,6 +203,11 @@ func TestRenderGolden(t *testing.T) {
 	for _, want := range []string{
 		"bind-key M-s run-shell -b \"/usr/bin/go-tmux-saver save\"\n",
 		"bind-key M-r run-shell \"/usr/bin/go-tmux-saver restore --merge\"\n",
+		// Stale-save indicator: append the freshness segment to status-right,
+		// guarded by a sentinel so re-sourcing (a config reload) does not
+		// stack duplicate copies.
+		"set -ag status-right \"#(/usr/bin/go-tmux-saver freshness --tmux)\"",
+		"@gts_freshness_installed",
 	} {
 		if !bytes.Contains(tmuxConf.Content, []byte(want)) {
 			t.Errorf("%s content = %s, want it to contain %q", RelTmuxConf, tmuxConf.Content, want)

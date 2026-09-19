@@ -175,7 +175,9 @@ generate` prints.
 | `socket` | `main` | tmux socket name (`tmux -L <socket>`) |
 | `seed_session` / `seed_window` | `default` / `h` | the always-present shell; `restore --on-start` only acts on a server holding nothing but this, and it is never touched by a restore |
 | `interval_minutes` | `10` | the save timer's period (rendered into the timer unit) |
-| `watch_stale_factor` | `3` | staleness limit = `interval_minutes × this` |
+| `watch_stale_factor` | `3` | staleness limit = `interval_minutes × this`; the email watchdog fires past it, and the in-tmux indicator turns red |
+| `warn_stale_factor` | `2` | the in-tmux indicator turns yellow past `interval_minutes × this` (before the red `watch_stale_factor` limit) |
+| `status_indicator` | `true` | show the in-tmux stale-save indicator in the status line (see below) |
 | `allowlist` | see `procs.DefaultAllowlist` | process names a pane's command may be relaunched from; anything else restores as a plain shell |
 | `guard.min_panes` | `5` | below this pane count the degenerate-save guard doesn't engage |
 | `guard.divisor` | `3` | reject a save with fewer than `last ÷ divisor` panes |
@@ -189,6 +191,19 @@ generate` prints.
 
 The data directory is derived, not configurable in the file — use
 `--data-dir` or `$XDG_DATA_HOME`.
+
+### Stale-save indicator
+
+`setup` appends a segment to tmux's `status-right` that stays invisible while
+saves are current and shows a coloured warning once the last good save ages
+past the thresholds — yellow at `warn_stale_factor × interval_minutes`, red at
+`watch_stale_factor × interval_minutes` (or `⚠ no save` when there is none).
+It is a plain status-line command, `go-tmux-saver freshness --tmux`, re-run
+each `status-interval`; it only stats the last-save marker (no tmux
+connection). This catches a stalled autosave that whoever is at the terminal
+can see, complementing the email watchdog. Set `status_indicator` to `false`
+to turn it off (no `setup update` needed). Run `go-tmux-saver freshness` (no
+`--tmux`) for a one-line `fresh`/`warn`/`stale`/`no save` health check.
 
 ## How it works
 

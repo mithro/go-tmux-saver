@@ -207,6 +207,18 @@ clears both units' streak markers (and mails one recovery per cleared
 marker), and a fresh `--check-fresh` clears the watch unit's marker — so the
 watchdog can never silence itself after its first alert.
 
+**In-tmux staleness indicator.** The managed tmux.conf appends a `status-right`
+segment, `#(go-tmux-saver freshness --tmux)`, re-evaluated each
+`status-interval`. `freshness --tmux` stats only the last-good-save marker (no
+tmux connection) and prints nothing while saves are fresh, a yellow warning
+past `warn_stale_factor × interval` (default 2×), and a red warning past
+`watch_stale_factor × interval` (or `⚠ no save`). It is a second, independent
+detector to the email watchdog — surfacing a stalled autosave to whoever is at
+the terminal, including cases where the email path is unavailable — and is
+gated by the `status_indicator` config key. The append is guarded by a
+`@gts_freshness_installed` sentinel so re-sourcing the file (a reload) does not
+duplicate the segment.
+
 **Restore on start.** The drop-in adds
 `ExecStartPost=-go-tmux-saver restore --on-start` after the existing
 `remain-on-exit` line of `tmux-server.service`. `--on-start` proceeds only when
