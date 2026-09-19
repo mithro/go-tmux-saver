@@ -106,6 +106,27 @@ func TestFreshnessPlain(t *testing.T) {
 	}
 }
 
+// TestFreshnessWarnFactorZeroDisablesYellow checks the use-time clamp: with
+// warn_stale_factor < 1 (e.g. a config.json predating the field, parsed
+// without Default's overlay), there is no yellow tier — an age that would be
+// "warn" under the default stays fresh, and only the red stale threshold
+// applies.
+func TestFreshnessWarnFactorZeroDisablesYellow(t *testing.T) {
+	now := time.Now()
+	cfg := freshCfg()
+	cfg.WarnStaleFactor = 0 // no yellow tier; warn collapses to the stale limit (30m)
+
+	dir := t.TempDir()
+	setLastGood(t, dir, 25*time.Minute, now) // in the old yellow band, below stale
+	if got := freshnessTmux(dir, cfg, now); got != "" {
+		t.Fatalf("with warn_stale_factor 0, a 25m age must be fresh (no yellow), got %q", got)
+	}
+	setLastGood(t, dir, 45*time.Minute, now) // past the stale limit
+	if got := freshnessTmux(dir, cfg, now); !strings.Contains(got, "fg=red") {
+		t.Fatalf("past the stale limit must still go red, got %q", got)
+	}
+}
+
 func TestCompactAge(t *testing.T) {
 	cases := []struct {
 		d    time.Duration

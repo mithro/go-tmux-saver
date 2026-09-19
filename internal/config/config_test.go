@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,34 @@ import (
 
 	"github.com/mithro/go-tmux-saver/internal/procs"
 )
+
+// TestValidateAcceptsConfigMissingNewFields is a regression test for the
+// config.json validate breakage: setup.validateFile parses config.json into a
+// *zero-value* Config (no Default() overlay), so a file written before
+// warn_stale_factor/status_indicator existed leaves them 0/false. Validate
+// must accept that — those fields default via Load at use time, and a hard
+// rule here would fail every pre-existing install's `setup validate`.
+func TestValidateAcceptsConfigMissingNewFields(t *testing.T) {
+	js := `{
+		"socket":"main","seed_session":"default","seed_window":"h",
+		"interval_minutes":10,"watch_stale_factor":3,
+		"allowlist":["ssh"],
+		"guard":{"min_panes":5,"divisor":3},
+		"contents":{"enabled":true,"codec":"gzip"},
+		"retention":{"keep":50,"daily_days":30,"rejected":20},
+		"mail_to":"tim"
+	}`
+	var c Config
+	if err := json.Unmarshal([]byte(js), &c); err != nil {
+		t.Fatal(err)
+	}
+	if c.WarnStaleFactor != 0 || c.StatusIndicator {
+		t.Fatalf("precondition: a file lacking the new keys should zero them, got warn=%d status=%v", c.WarnStaleFactor, c.StatusIndicator)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate rejected a config predating the new fields: %v", err)
+	}
+}
 
 func TestDefaultsAndLoad(t *testing.T) {
 	d := Default()
@@ -86,7 +115,6 @@ func TestValidateBranches(t *testing.T) {
 		wantKey string
 	}{
 		{"interval_minutes", func(c *Config) { c.IntervalMinutes = 0 }, "interval_minutes"},
-		{"warn_stale_factor", func(c *Config) { c.WarnStaleFactor = 0 }, "warn_stale_factor"},
 		{"guard.divisor", func(c *Config) { c.Guard.Divisor = 1 }, "guard.divisor"},
 		{"guard.min_panes", func(c *Config) { c.Guard.MinPanes = 0 }, "guard.min_panes"},
 		{"retention.keep", func(c *Config) { c.Retention.Keep = 0 }, "retention.keep"},
