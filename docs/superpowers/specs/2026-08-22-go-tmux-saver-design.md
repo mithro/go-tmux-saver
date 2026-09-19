@@ -33,7 +33,9 @@ manually. ~100 % of that time is fork/IPC overhead, not data.
 **Goals**
 
 - Never lose state silently: saves happen on a timer independent of any
-  client being attached; failures and staleness are detected and mailed.
+  client being attached; failures and staleness are surfaced in-band — in the
+  tmux status line for the human, and in the systemd journal / a `failed`
+  unit for tooling. go-tmux-saver never notifies out-of-band.
 - Deterministic restore on server start, no clock heuristics.
 - Additive, conflict-safe restore into a live server.
 - Fast: < 0.5 s for 50 panes.
@@ -53,21 +55,26 @@ manually. ~100 % of that time is fork/IPC overhead, not data.
 - Native save/restore commands inside tmux itself (possible later
   optimisation; the tool may detect and prefer them if they appear).
 - Cross-host/remote snapshots, encryption, or multi-user servers.
+- Out-of-band notification (email, webhooks, desktop popups). Removed
+  2026-09-20: a command-line tmux tool should not own an email/`sendmail`
+  channel — it was never requested and it sent unprompted mail on hosts with
+  a live MTA (including from the test suite). go-tmux-saver logs to the
+  journal and surfaces staleness in tmux; wiring mail/paging off a unit's
+  `OnFailure=` is the operator's job, done independently.
 
 ## 3. Architecture
 
 One static Go binary, **`go-tmux-saver`**, with subcommands `save`, `restore`,
 `status`, `prune`, `import-resurrect`, `setup {generate,install,validate,
-update}`, `alert`.
+update}`.
 
 | Piece | Responsibility |
 |---|---|
 | `go-tmux-saver save` | One control-mode connection + one `/proc` pass → snapshot directory (`layout.json` + per-pane hardlinked scrollback files); guard; event log; prune. |
 | `go-tmux-saver restore` | Plan + apply an additive merge of a snapshot into the running server; `--on-start` mode for seed-only servers. |
 | `go-tmux-saver.timer/.service` (user) | Periodic `save --auto`, `Persistent=true`, runs attached or detached. |
-| `go-tmux-saver-watch.timer/.service` (user) | Hourly `status --check-fresh`; mails if the newest good save is older than 3× the interval. |
+| `go-tmux-saver-watch.timer/.service` (user) | Hourly `status --check-fresh`; exits non-zero (→ unit `failed` + journal record) when the newest good save is older than 3× the interval. No mail — attach your own `OnFailure=` drop-in to raise one. |
 | `go-tmux-saver-shutdown.service` (user) | `ExecStop=-save --auto`; ordered `After=`/`PartOf=tmux-server.service` so a graceful stop/shutdown snapshots before the server dies. |
-| `go-tmux-saver-alert@.service` (user) | `OnFailure=` target; `go-tmux-saver alert` mails the failure via `sendmail -t`. |
 | `tmux-server.service.d/50-go-tmux-saver.conf` (drop-in) | `ExecStartPost=-go-tmux-saver restore --on-start` on the existing, unmodified unit. |
 | `~/.config/go-tmux-saver/tmux.conf` | Generated keybinding snippet (`M-s`, `M-r`) sourced from the rcfiles tmux config by one guarded line. |
 | `~/.config/go-tmux-saver/config.json` | Generated defaults; the only file a human edits. |
@@ -195,28 +202,30 @@ silently stop until the next real reboot (the 2026-09 ten64 6.5-day blackout).
 The freshness-watch timer carries the same `OnActiveSec` seed for the same
 reason — otherwise the watchdog dies in the same failure domain as the saver.
 `go-tmux-saver.service`: `Type=oneshot`, `After=tmux-server.service`,
-`ExecStart=go-tmux-saver save --auto`, `OnFailure=go-tmux-saver-alert@%n.service`.
+`ExecStart=go-tmux-saver save --auto`. A hard failure fails the unit and lands
+in the journal (no out-of-band alert).
 `--auto` exit codes: 0 for `kept|unchanged|rejected-degenerate|skipped` (all
 logged; `skipped` = no server running, normal right after boot), non-zero only
 for hard errors (tmux reachable but a command/IO failure, write failure).
 
 **Watchdog.** `go-tmux-saver-watch.timer` hourly → `status --check-fresh`:
-non-zero (→ alert mail) when the newest `kept|unchanged` is older than 3× the
-configured interval. This is the detector the 23-day blackout lacked. Alert mails are
-rate-limited per unit (one per failure streak); a successful `save --auto`
-clears both units' streak markers (and mails one recovery per cleared
-marker), and a fresh `--check-fresh` clears the watch unit's marker — so the
-watchdog can never silence itself after its first alert.
+exits non-zero when the newest `kept|unchanged` is older than 3× the
+configured interval, which puts `go-tmux-saver-watch.service` into `failed`
+and records it in the journal. This is the detector the 23-day blackout
+lacked. It sends nothing itself — no rate limiter, no markers, no mail. The
+failed unit / journal line is the whole signal; an operator who wants mail or
+paging off staleness attaches their own `OnFailure=` drop-in to the watch
+unit, independently of go-tmux-saver.
 
 **In-tmux staleness indicator.** The managed tmux.conf appends a `status-right`
 segment, `#(go-tmux-saver freshness --tmux)`, re-evaluated each
 `status-interval`. `freshness --tmux` stats only the last-good-save marker (no
 tmux connection) and prints nothing while saves are fresh, a yellow warning
 past `warn_stale_factor × interval` (default 2×), and a red warning past
-`watch_stale_factor × interval` (or `⚠ no save`). It is a second, independent
-detector to the email watchdog — surfacing a stalled autosave to whoever is at
-the terminal, including cases where the email path is unavailable — and is
-gated by the `status_indicator` config key. The append is guarded by a
+`watch_stale_factor × interval` (or `⚠ no save`). This is the human-facing
+staleness signal — it surfaces a stalled autosave to whoever is at the
+terminal — complementing the watch unit's journal signal; it is gated by the
+`status_indicator` config key. The append is guarded by a
 `@gts_freshness_installed` sentinel so re-sourcing the file (a reload) does not
 duplicate the segment.
 
@@ -315,8 +324,9 @@ file; run 'go-tmux-saver setup update'`. Unmanaged files are never touched.
 `config.json` keys (with defaults): `socket` (`main`), `interval_minutes` (10),
 `watch_stale_factor` (3), `allowlist` (list above), `guard.min_panes` (5),
 `guard.divisor` (3), `contents.enabled` (true), `contents.codec` (`gzip`),
-`retention` (`{keep: 50, daily_days: 30, rejected: 20}`), `mail_to`
-(`$USER`), `claude_resume_path` (`~/bin/claude-resume`).
+`retention` (`{keep: 50, daily_days: 30, rejected: 20}`), `warn_stale_factor`
+(2, status-line yellow tier), `status_indicator` (true),
+`claude_resume_path` (`~/bin/claude-resume`).
 
 The only thing outside the tool is one guarded line in the rcfiles tmux
 config (`if-shell "test -r ~/.config/go-tmux-saver/tmux.conf" "source-file
@@ -387,8 +397,9 @@ branches, always-suggest-update-branch, tag ruleset enforcing `vXX.ZZZ`.
 
 - Loud and never half-written: temp+fsync+rename everywhere; every outcome is
   in `events.log`, on stderr, and in the exit code.
-- Alerts via `sendmail -t` through the fleet mail relay, rate-limited to one
-  mail per failure streak plus one on recovery.
+- In-band signalling only: a hard failure fails the systemd unit and is
+  recorded in the journal; staleness shows in the tmux status line and fails
+  `go-tmux-saver-watch.service`. go-tmux-saver sends nothing out-of-band.
 - `status [--json]` exposes the last N events, freshness, timer state.
 - Data dir `0700`, files `0600` (snapshots contain scrollback).
 - Restore is idempotent; partial restores are completed by re-running.
