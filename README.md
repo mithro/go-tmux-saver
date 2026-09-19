@@ -28,12 +28,15 @@ static binaries and `.deb`s, publishes a [GitHub Release](https://github.com/mit
 and refreshes the signed apt repository at <https://mith.ro/go-tmux-saver/>.
 
 ```sh
+sudo install -d -m0755 /etc/apt/keyrings
 curl -fsSL https://mith.ro/go-tmux-saver/go-tmux-saver.gpg \
   | sudo tee /etc/apt/keyrings/mithro-go-tmux-saver.gpg > /dev/null
-echo "deb [signed-by=/etc/apt/keyrings/mithro-go-tmux-saver.gpg] https://mith.ro/go-tmux-saver/ ./" \
+echo "deb [signed-by=/etc/apt/keyrings/mithro-go-tmux-saver.gpg] https://mith.ro/go-tmux-saver/trixie/ ./" \
   | sudo tee /etc/apt/sources.list.d/mithro-go-tmux-saver.list
 sudo apt update && sudo apt install go-tmux-saver
 ```
+
+On sid, use `https://mith.ro/go-tmux-saver/sid/` instead.
 
 The package installs only `/usr/bin/go-tmux-saver`; per-user units,
 keybindings and `config.json` are created by `go-tmux-saver setup install`.
