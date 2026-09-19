@@ -15,56 +15,11 @@ import (
 
 	"github.com/mithro/go-tmux-saver/internal/collect"
 	"github.com/mithro/go-tmux-saver/internal/config"
-	"github.com/mithro/go-tmux-saver/internal/mail"
 	"github.com/mithro/go-tmux-saver/internal/procs"
 	"github.com/mithro/go-tmux-saver/internal/snapshot"
 	"github.com/mithro/go-tmux-saver/internal/tmuxctl"
 	"github.com/mithro/go-tmux-saver/internal/trace"
 )
-
-// alertUnit and watchAlertUnit are the systemd unit names
-// go-tmux-saver-alert@.service is instantiated with (see the Task 16
-// templates), and thus the RateLimiter keys a success must clear.
-//
-// RULING R46: a successful save clears BOTH. Nothing else ever cleared the
-// watch unit's marker — `status --check-fresh` didn't, and the watch unit
-// only ever runs the alert on FAILURE — so after the first staleness mail
-// the watchdog stayed rate-limited forever and never mailed again. A save
-// succeeding is exactly the condition the watch unit tests for, so it ends
-// that streak too.
-const (
-	alertUnit      = "go-tmux-saver.service"
-	watchAlertUnit = "go-tmux-saver-watch.service"
-)
-
-// alertUnits is the full set of units whose alert markers a success clears.
-var alertUnits = []string{alertUnit, watchAlertUnit}
-
-// clearAlertsAndNotify clears each unit's rate-limit marker under dataDir
-// and sends exactly one recovery mail for every marker that actually
-// existed. Sending is best-effort: a sendmail failure is returned for the
-// caller to log, never turned into a non-zero exit — the operation that
-// triggered the recovery already succeeded. body is a thunk (issue #9):
-// rendering the mail body can be expensive (status + events tail) and is
-// only needed on the rare tick where a marker actually cleared, so it runs
-// at most once and only then.
-func clearAlertsAndNotify(dataDir, host, mailTo string, body func() string, units []string) []error {
-	rl := mail.RateLimiter{Dir: dataDir}
-	var errs []error
-	rendered := ""
-	for _, u := range units {
-		if !rl.Clear(u) {
-			continue
-		}
-		if rendered == "" {
-			rendered = body()
-		}
-		if err := mail.Send(mail.Sendmail, mailTo, mail.Subject(host, u, true), rendered); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", u, err))
-		}
-	}
-	return errs
-}
 
 // lockFile is the exclusive save lock inside the data dir (RULING R47).
 const lockFile = ".lock"
@@ -391,12 +346,6 @@ func init() {
 
 		summary := fmt.Sprintf("%s panes=%d last=%d %s", o.Kind, o.Panes, o.LastPanes, o.Duration.Round(time.Millisecond))
 		fmt.Fprintln(stdout, summary)
-
-		if *auto && (o.Kind == "kept" || o.Kind == "unchanged") {
-			for _, err := range clearAlertsAndNotify(store.Dir, host, cfg.MailTo, func() string { return "save succeeded: " + summary }, alertUnits) {
-				fmt.Fprintln(stderr, "alert: recovery mail:", err)
-			}
-		}
 		return 0
 	}})
 }
