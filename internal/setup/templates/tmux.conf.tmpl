@@ -6,3 +6,15 @@ bind-key M-s run-shell -b "{{.Binary}} save"
 # M-r stays in the foreground: it mutates the server, so the user wants the
 # result before touching anything else.
 bind-key M-r run-shell "{{.Binary}} restore --merge"
+# Stale-save indicator: append a status-right segment that shows a coloured
+# warning once the last save is older than the configured thresholds, and
+# nothing when saves are fresh (or config's status_indicator is false) — so
+# it is invisible in the normal case. `freshness --tmux` runs every
+# status-interval; it only stats the last-save marker, no tmux connection.
+# The @gts_freshness_installed sentinel makes re-sourcing this file (a config
+# reload) idempotent: the segment is appended once per server, not once per
+# reload.
+if-shell -F '#{?@gts_freshness_installed,0,1}' {
+  set -ag status-right "#({{.Binary}} freshness --tmux)"
+  set -g @gts_freshness_installed 1
+}
