@@ -12,7 +12,8 @@ import (
 func TestDefaultsAndLoad(t *testing.T) {
 	d := Default()
 	if d.Socket != "main" || d.IntervalMinutes != 10 || d.Guard.MinPanes != 5 || d.Guard.Divisor != 3 ||
-		d.Contents.Codec != "gzip" || !d.Contents.Enabled || d.Retention.Keep != 50 || d.SeedSession != "default" || d.SeedWindow != "h" {
+		d.Contents.Codec != "gzip" || !d.Contents.Enabled || d.Retention.Keep != 50 || d.SeedSession != "default" || d.SeedWindow != "h" ||
+		d.WatchStaleFactor != 3 || d.WarnStaleFactor != 2 || !d.StatusIndicator {
 		t.Fatalf("defaults %+v", d)
 	}
 	if err := d.Validate(); err != nil {
@@ -85,6 +86,7 @@ func TestValidateBranches(t *testing.T) {
 		wantKey string
 	}{
 		{"interval_minutes", func(c *Config) { c.IntervalMinutes = 0 }, "interval_minutes"},
+		{"warn_stale_factor", func(c *Config) { c.WarnStaleFactor = 0 }, "warn_stale_factor"},
 		{"guard.divisor", func(c *Config) { c.Guard.Divisor = 1 }, "guard.divisor"},
 		{"guard.min_panes", func(c *Config) { c.Guard.MinPanes = 0 }, "guard.min_panes"},
 		{"retention.keep", func(c *Config) { c.Retention.Keep = 0 }, "retention.keep"},
