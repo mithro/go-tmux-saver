@@ -127,6 +127,38 @@ func testEnv(home string, fake *fakeSystemctl) Env {
 	}
 }
 
+// TestShutdownServiceRendersPreStopSave pins the go-tmux-saver-shutdown.service
+// contract: it saves on stop, ordered so it runs while the tmux server is
+// still alive, and can never fault the unit or hang shutdown.
+func TestShutdownServiceRendersPreStopSave(t *testing.T) {
+	files := renderTestFiles(t)
+	var u Managed
+	for _, f := range files {
+		if f.Rel == RelShutdownService {
+			u = f
+		}
+	}
+	if u.Content == nil {
+		t.Fatal("Render produced no shutdown service")
+	}
+	for _, want := range []string{
+		"After=tmux-server.service",  // stops BEFORE tmux-server → save while the server is alive
+		"PartOf=tmux-server.service", // a stop/restart of the server propagates here
+		"RemainAfterExit=yes",        // stays active so systemd runs ExecStop at stop
+		"ExecStop=-/usr/bin/go-tmux-saver save --auto --no-display",
+		"TimeoutStopSec=", // bounded so a slow save can neither hang shutdown nor be SIGKILLed too late
+	} {
+		if !bytes.Contains(u.Content, []byte(want)) {
+			t.Errorf("shutdown service missing %q:\n%s", want, u.Content)
+		}
+	}
+	// The '-' prefix is load-bearing: a save failure must never fault the unit
+	// (which would block or fail shutdown).
+	if !bytes.Contains(u.Content, []byte("ExecStop=-")) {
+		t.Errorf("shutdown service ExecStop must be '-'-prefixed:\n%s", u.Content)
+	}
+}
+
 // (a) Render golden: every file starts with the managed header (except
 // config.json, which stays pure JSON), the service file's ExecStart line is
 // exactly right, and Render's output is the full, deterministically
@@ -139,7 +171,7 @@ func TestRenderGolden(t *testing.T) {
 	}
 
 	wantRels := []string{
-		RelService, RelTimer, RelWatchService, RelWatchTimer,
+		RelService, RelTimer, RelWatchService, RelWatchTimer, RelShutdownService,
 		RelAlertService, RelTmuxDropin, RelTmuxConf, RelConfigJSON,
 	}
 	if len(files) != len(wantRels) {
@@ -268,7 +300,7 @@ func TestInstallWritesFilesAndEnablesTimers(t *testing.T) {
 		t.Fatalf("Install must daemon-reload before enable --now; calls = %v", fake.calls)
 	}
 	enableCall := strings.Join(fake.calls[idxEnable], " ")
-	for _, want := range []string{"--now", "go-tmux-saver.timer", "go-tmux-saver-watch.timer"} {
+	for _, want := range []string{"--now", "go-tmux-saver.timer", "go-tmux-saver-watch.timer", "go-tmux-saver-shutdown.service"} {
 		if !strings.Contains(enableCall, want) {
 			t.Errorf("enable call = %q, want it to contain %q", enableCall, want)
 		}
@@ -424,6 +456,11 @@ func TestUpdateDryRunThenApplies(t *testing.T) {
 			joined := strings.Join(c, " ")
 			if strings.Contains(joined, "go-tmux-saver.timer") && strings.Contains(joined, "go-tmux-saver-watch.timer") {
 				sawRestart = true
+			}
+			// The shutdown unit must never be restarted: its ExecStop is a
+			// save, so restarting it on every `setup update` would fire a save.
+			if strings.Contains(joined, "go-tmux-saver-shutdown.service") {
+				t.Errorf("Update must NOT restart the shutdown unit (its ExecStop is a save); call = %q", joined)
 			}
 		}
 	}

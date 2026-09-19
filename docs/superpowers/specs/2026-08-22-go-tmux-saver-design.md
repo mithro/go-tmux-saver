@@ -66,6 +66,7 @@ update}`, `alert`.
 | `go-tmux-saver restore` | Plan + apply an additive merge of a snapshot into the running server; `--on-start` mode for seed-only servers. |
 | `go-tmux-saver.timer/.service` (user) | Periodic `save --auto`, `Persistent=true`, runs attached or detached. |
 | `go-tmux-saver-watch.timer/.service` (user) | Hourly `status --check-fresh`; mails if the newest good save is older than 3× the interval. |
+| `go-tmux-saver-shutdown.service` (user) | `ExecStop=-save --auto`; ordered `After=`/`PartOf=tmux-server.service` so a graceful stop/shutdown snapshots before the server dies. |
 | `go-tmux-saver-alert@.service` (user) | `OnFailure=` target; `go-tmux-saver alert` mails the failure via `sendmail -t`. |
 | `tmux-server.service.d/50-go-tmux-saver.conf` (drop-in) | `ExecStartPost=-go-tmux-saver restore --on-start` on the existing, unmodified unit. |
 | `~/.config/go-tmux-saver/tmux.conf` | Generated keybinding snippet (`M-s`, `M-r`) sourced from the rcfiles tmux config by one guarded line. |
@@ -233,6 +234,23 @@ errors.)
 No time-based heuristic. zprofile's login clone only needs `default` to exist,
 which it does before `ExecStartPost`, so logins during a restore simply see
 windows appear.
+
+**Save on stop/shutdown.** `go-tmux-saver-shutdown.service` (user) captures a
+final save just before the server goes away, so a graceful reboot restores the
+live state rather than the last periodic snapshot (up to a full interval old).
+It is a `Type=oneshot`, `RemainAfterExit=yes` unit whose only real action is
+`ExecStop=-go-tmux-saver save --auto --no-display`, ordered `After=` and
+`PartOf=tmux-server.service`: `After` makes it stop *before* tmux-server (so
+the server is still alive to snapshot), and `PartOf` makes a stop, restart, or
+system shutdown of tmux-server pull it down too. This is strictly additive — it
+never touches tmux-server.service's own `ExecStop` (which kills the server), so
+there is no ordering reset or coupling to how that unit stops. The `-` prefix
+and a `TimeoutStopSec` keep a slow or failed save from faulting the unit or
+hanging shutdown; snapshot writes are atomic, so a save SIGKILLed at the
+timeout cannot corrupt `last`. It complements the periodic timer, which remains
+the only defence against an *un*graceful loss (crash, power cut, `kill -9`).
+Enabled like the timers, but never restarted by `setup update` (a restart would
+run its `ExecStop` = a save).
 
 **Merge semantics** (`restore`, `restore --merge`, `M-r`) — strictly additive:
 
