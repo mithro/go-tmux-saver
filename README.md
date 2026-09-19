@@ -196,6 +196,32 @@ topology, failure handling) and
 [`docs/superpowers/plans/2026-08-22-go-tmux-saver-core.md`](docs/superpowers/plans/2026-08-22-go-tmux-saver-core.md)
 for the task-by-task implementation plan this repo was built from.
 
+## Running the tests
+
+```sh
+make test            # plain `go test ./...`
+make test-sandboxed  # for hosts that also run a production tmux server
+```
+
+Parts of the suite start real, throwaway tmux servers. Two safeguards keep
+those from ever touching a production tmux server on the same machine (a
+workstation, or a host like a router where go-tmux-saver runs for real):
+
+- **Socket isolation is always on.** Each test package's `TestMain` calls
+  `internal/tmuxtest.Isolate`, which points `TMUX_TMPDIR` at a private,
+  throwaway directory (and unsets `TMUX`) before any server starts. Every
+  test socket then lives under that directory instead of `/tmp/tmux-$UID/`,
+  so a test can neither see, reuse, nor clobber the real server — even a plain
+  `go test ./...` is safe. An already-set `TMUX_TMPDIR` is respected, so an
+  outer sandbox composes with it.
+- **`make test-sandboxed` adds resource limits.** It runs the suite under a
+  transient `systemd-run --user --scope` cgroup capping memory, CPU and task
+  count (defaults `2G` / `300%` / `4096`, overridable via `GTS_TEST_MEM`,
+  `GTS_TEST_CPU`, `GTS_TEST_TASKS`), so the tests cannot swamp a live host. It
+  also scrubs the environment and cleans up afterwards. Use it on any machine
+  running a tmux server you care about. See
+  [`scripts/sandboxed-test.py`](scripts/sandboxed-test.py).
+
 ## Status
 
 This is Plan 1 (core tool) — save/restore/status/prune/setup/alert/import are
