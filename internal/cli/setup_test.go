@@ -210,7 +210,6 @@ func TestSetupGenerateCLIWritesFilesWithNoExecCalls(t *testing.T) {
 		{gtssetup.RelTimer, 0o644},
 		{gtssetup.RelWatchService, 0o644},
 		{gtssetup.RelWatchTimer, 0o644},
-		{gtssetup.RelAlertService, 0o644},
 		{gtssetup.RelTmuxDropin, 0o644},
 		{gtssetup.RelTmuxConf, 0o644},
 		{gtssetup.RelConfigJSON, 0o600},
@@ -248,7 +247,7 @@ func TestSetupGenerateNoDirWritesToStdout(t *testing.T) {
 
 	for _, rel := range []string{
 		gtssetup.RelService, gtssetup.RelTimer, gtssetup.RelWatchService, gtssetup.RelWatchTimer,
-		gtssetup.RelAlertService, gtssetup.RelTmuxDropin, gtssetup.RelTmuxConf, gtssetup.RelConfigJSON,
+		gtssetup.RelTmuxDropin, gtssetup.RelTmuxConf, gtssetup.RelConfigJSON,
 	} {
 		if !strings.Contains(out.String(), "=== "+rel+" ===") {
 			t.Errorf("stdout missing the %q separator:\n%s", rel, out.String())

@@ -1,6 +1,9 @@
 {{.Header}}[Unit]
 Description=go-tmux-saver freshness watch
-OnFailure=go-tmux-saver-alert@%n.service
+# A non-zero exit (the newest good save is older than watch_stale_factor ×
+# the interval) puts this unit into `failed` and records it in the journal.
+# That is the whole signal: go-tmux-saver never notifies out-of-band. Attach
+# your own OnFailure= drop-in here if you want mail/paging off staleness.
 
 [Service]
 Type=oneshot
