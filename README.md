@@ -36,11 +36,7 @@ echo "deb [signed-by=/etc/apt/keyrings/mithro-go-tmux-saver.gpg] https://mith.ro
 sudo apt update && sudo apt install go-tmux-saver
 ```
 
-Each suite is its own flat repository, so the URL must name one (`trixie/` or
-`sid/`) and keep the trailing `./`. The repository root carries no `Packages`
-file, so a source line pointing at it fails `apt update` with a 404. The two
-suites carry identical contents -- the package is static with no
-suite-specific dependencies -- so pick either on a derivative or newer Debian.
+On sid, use `https://mith.ro/go-tmux-saver/sid/` instead.
 
 The package installs only `/usr/bin/go-tmux-saver`; per-user units,
 keybindings and `config.json` are created by `go-tmux-saver setup install`.
