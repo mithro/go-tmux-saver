@@ -184,8 +184,15 @@ unchanged since the last snapshot; an optional non-`-e` capture mode
 
 ## 5. Trigger, restore and lifecycle integration
 
-**Periodic save.** `go-tmux-saver.timer`: `OnBootSec=2min`,
-`OnUnitActiveSec=10min`, `Persistent=true`, `AccuracySec=1min`.
+**Periodic save.** `go-tmux-saver.timer`: `OnBootSec=2min`, `OnActiveSec=2min`,
+`OnUnitActiveSec=10min`, `Persistent=true`, `AccuracySec=1min`. `OnActiveSec`
+re-seeds the first run on every timer *activation* (i.e. every `systemd --user`
+manager start), not just at boot: `OnBootSec` is measured from system boot and
+`OnUnitActiveSec` needs a prior run to count from, so without `OnActiveSec` a
+manager restart mid-boot leaves the timer active-but-unarmed and snapshots
+silently stop until the next real reboot (the 2026-09 ten64 6.5-day blackout).
+The freshness-watch timer carries the same `OnActiveSec` seed for the same
+reason — otherwise the watchdog dies in the same failure domain as the saver.
 `go-tmux-saver.service`: `Type=oneshot`, `After=tmux-server.service`,
 `ExecStart=go-tmux-saver save --auto`, `OnFailure=go-tmux-saver-alert@%n.service`.
 `--auto` exit codes: 0 for `kept|unchanged|rejected-degenerate|skipped` (all

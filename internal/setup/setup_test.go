@@ -35,6 +35,34 @@ func renderTestFiles(t *testing.T) []Managed {
 	return files
 }
 
+// TestRenderTimersReseedOnActivate guards against a silent-blackout footgun:
+// both timers must carry an activation-relative seed (OnActiveSec=) in
+// addition to OnBootSec=. OnBootSec fires once relative to *system boot*, so
+// if the systemd --user manager is restarted mid-boot (as happens when
+// user@UID.service is bounced), the OnBootSec anchor is already in the past
+// and OnUnitActiveSec has nothing to count from — the timer sits `active`
+// but never fires again until the next real reboot. OnActiveSec re-seeds a
+// first run on every timer (re)activation, so snapshots resume within
+// minutes of any manager restart. Regression test for the 2026-09 ten64
+// 6.5-day autosave blackout.
+func TestRenderTimersReseedOnActivate(t *testing.T) {
+	files := renderTestFiles(t)
+	for _, rel := range []string{RelTimer, RelWatchTimer} {
+		var timer Managed
+		for _, f := range files {
+			if f.Rel == rel {
+				timer = f
+			}
+		}
+		if timer.Content == nil {
+			t.Fatalf("Render produced no %s", rel)
+		}
+		if !bytes.Contains(timer.Content, []byte("OnActiveSec=")) {
+			t.Errorf("%s content = %s, want an OnActiveSec= re-seed line", rel, timer.Content)
+		}
+	}
+}
+
 // fakeSystemctl records every call it's given and answers just enough to
 // look like a freshly-Installed, healthy system: both timers enabled and
 // active, `systemd-analyze --user verify` clean, and tmux-server.service's
