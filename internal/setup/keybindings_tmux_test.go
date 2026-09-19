@@ -2,12 +2,13 @@ package setup
 
 import (
 	"bytes"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/mithro/go-tmux-saver/internal/tmuxtest"
 )
 
 // TestValidateKeyBindingsAgainstRealTmux closes the loop that fixtures
@@ -49,7 +50,7 @@ func TestValidateKeyBindingsAgainstRealTmux(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sock := fmt.Sprintf("gts-kb-%d-%s", os.Getpid(), strings.ReplaceAll(t.Name(), "/", "_"))
+	sock := tmuxtest.SocketName(t.Name())
 	tmux := func(args ...string) string {
 		t.Helper()
 		out, err := exec.Command("tmux", append([]string{"-L", sock}, args...)...).CombinedOutput()
