@@ -2,7 +2,11 @@
 Description=go-tmux-saver freshness watch timer
 
 [Timer]
+# OnActiveSec re-seeds the first run on every (re)activation of this timer,
+# so a systemd --user manager restart mid-boot can't silently disable the
+# freshness watchdog until the next reboot (see go-tmux-saver.timer).
 OnBootSec=15min
+OnActiveSec=15min
 OnUnitActiveSec=1h
 Persistent=true
 

@@ -94,6 +94,10 @@ def answer_dialogs():
                    "Choose the text style", "to continue"):
         if marker in text:
             log(f"answering dialog: {marker!r}")
+            # Enter takes the highlighted option; never let that be "exit"
+            # (the trust dialog's default since Claude Code 2.1.267).
+            if "❯ No, exit" in text:
+                tmux("send-keys", "-t", "=default:1", "Down")
             tmux("send-keys", "-t", "=default:1", "Enter")
             return False
     return any(m in text for m in ("? for shortcuts", "⏵⏵", "╭"))
@@ -105,11 +109,14 @@ def main():
     DATA.mkdir()
     CFG.write_text(json.dumps({"socket": SOCK, "seed_session": "default",
                                "seed_window": "h"}))
-    # Skip onboarding and the use-this-API-key dialog (probe-verified fields).
+    # Skip onboarding, the use-this-API-key dialog and the folder-trust
+    # dialog (probe-verified fields). The trust dialog defaults to "No,
+    # exit" since Claude Code 2.1.267, so it must not be left to Enter.
     (HOME / ".claude.json").write_text(json.dumps({
         "hasCompletedOnboarding": True,
         "theme": "dark",
         "customApiKeyResponses": {"approved": [DUMMY_KEY[-20:]], "rejected": []},
+        "projects": {str(PROJ): {"hasTrustDialogAccepted": True}},
     }))
 
     port = fake_anthropic.serve(log_path=str(API_LOG))
