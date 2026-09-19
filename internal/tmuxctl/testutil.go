@@ -1,11 +1,10 @@
 package tmuxctl
 
 import (
-	"fmt"
-	"os"
 	"os/exec"
-	"strings"
 	"testing"
+
+	"github.com/mithro/go-tmux-saver/internal/tmuxtest"
 )
 
 // StartTestServer starts a throwaway tmux server (session "default", window
@@ -22,8 +21,7 @@ func StartTestServer(t testing.TB) string {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
-	name := strings.ReplaceAll(t.Name(), "/", "_")
-	sock := fmt.Sprintf("gts-test-%d-%s", os.Getpid(), name)
+	sock := tmuxtest.SocketName(t.Name())
 	if out, err := exec.Command("tmux", "-L", sock, "-f", "/dev/null", "new-session", "-d", "-s", "default", "-n", "h", "tail -f /dev/null").CombinedOutput(); err != nil {
 		t.Fatalf("start tmux: %v: %s", err, out)
 	}

@@ -13,6 +13,7 @@ import (
 	"github.com/mithro/go-tmux-saver/internal/collect"
 	"github.com/mithro/go-tmux-saver/internal/procs"
 	"github.com/mithro/go-tmux-saver/internal/tmuxctl"
+	"github.com/mithro/go-tmux-saver/internal/tmuxtest"
 )
 
 // envInt reads a positive integer from the environment, or returns def.
@@ -38,7 +39,7 @@ func startPanes(t testing.TB, n, lines int) string {
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux not installed")
 	}
-	sock := fmt.Sprintf("gts-bench-%d-%s", os.Getpid(), strings.ReplaceAll(t.Name(), "/", "_"))
+	sock := tmuxtest.SocketName(t.Name())
 	tmux := func(args ...string) ([]byte, error) {
 		return exec.Command("tmux", append([]string{"-L", sock}, args...)...).CombinedOutput()
 	}
