@@ -2,7 +2,13 @@
 Description=go-tmux-saver periodic snapshot timer
 
 [Timer]
+# OnActiveSec re-seeds the first run every time this timer (re)activates —
+# e.g. whenever the systemd --user manager is restarted mid-boot. Without it,
+# a restart leaves only OnBootSec (already elapsed for this boot) and
+# OnUnitActiveSec (no prior run to count from), so the timer sits active but
+# never fires again until the next real reboot — silently stopping snapshots.
 OnBootSec=2min
+OnActiveSec=2min
 OnUnitActiveSec={{.IntervalMinutes}}min
 AccuracySec=1min
 Persistent=true
