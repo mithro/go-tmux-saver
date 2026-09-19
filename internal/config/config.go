@@ -114,9 +114,14 @@ func (c Config) Validate() error {
 	if c.IntervalMinutes < 1 {
 		return fmt.Errorf("config: interval_minutes must be >= 1, got %d", c.IntervalMinutes)
 	}
-	if c.WarnStaleFactor < 1 {
-		return fmt.Errorf("config: warn_stale_factor must be >= 1, got %d", c.WarnStaleFactor)
-	}
+	// warn_stale_factor and watch_stale_factor are intentionally NOT hard-
+	// validated: like the other optional tunables they default via Default()
+	// when absent (Load overlays the file onto it). setup.validateFile also
+	// runs Validate against config.json parsed into a *zero-value* Config, so
+	// a field missing from a config.json written before that field existed
+	// reads as 0 — a "must be >= 1" rule here would wrongly fail every such
+	// pre-existing file. Sub-1 values are handled gracefully at use time
+	// (classifyFreshness treats warn_stale_factor < 1 as "no yellow tier").
 	if c.Guard.Divisor < 2 {
 		return fmt.Errorf("config: guard.divisor must be >= 2, got %d", c.Guard.Divisor)
 	}

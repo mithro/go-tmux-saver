@@ -30,8 +30,15 @@ func classifyFreshness(dataDir string, cfg config.Config, now time.Time) (freshT
 		return tierNoSave, 0
 	}
 	age := now.Sub(lastGood)
-	warn := time.Duration(cfg.IntervalMinutes*cfg.WarnStaleFactor) * time.Minute
 	stale := time.Duration(cfg.IntervalMinutes*cfg.WatchStaleFactor) * time.Minute
+	// warn_stale_factor < 1 disables the yellow tier (warn == stale) rather
+	// than making the warn threshold 0 and flagging everything yellow at once.
+	// This also keeps a config.json that predates warn_stale_factor sane when
+	// used without Default()'s overlay.
+	warn := stale
+	if cfg.WarnStaleFactor >= 1 {
+		warn = time.Duration(cfg.IntervalMinutes*cfg.WarnStaleFactor) * time.Minute
+	}
 	switch {
 	case age >= stale:
 		return tierStale, age
