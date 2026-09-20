@@ -17,7 +17,7 @@ type Config struct {
 	SeedSession      string   `json:"seed_session"`       // "default"
 	SeedWindow       string   `json:"seed_window"`        // "h"
 	IntervalMinutes  int      `json:"interval_minutes"`   // 10
-	WatchStaleFactor int      `json:"watch_stale_factor"` // 3 — email watchdog + status-line red tier
+	WatchStaleFactor int      `json:"watch_stale_factor"` // 3 — go-tmux-saver-watch.service staleness threshold + status-line red tier
 	WarnStaleFactor  int      `json:"warn_stale_factor"`  // 2 — status-line yellow tier (red reuses watch_stale_factor)
 	StatusIndicator  bool     `json:"status_indicator"`   // true — show the in-tmux stale-save status-line indicator
 	Allowlist        []string `json:"allowlist"`
@@ -34,7 +34,6 @@ type Config struct {
 		DailyDays int `json:"daily_days"`
 		Rejected  int `json:"rejected"`
 	} `json:"retention"`
-	MailTo           string `json:"mail_to"`            // $USER
 	ClaudeResumePath string `json:"claude_resume_path"` // "" = built-in `go-tmux-saver claude-resume`; set to use an external script
 	DataDir          string `json:"-"`                  // derived: $XDG_DATA_HOME/go-tmux-saver
 }
@@ -57,7 +56,6 @@ func Default() Config {
 	c.Retention.Keep = 50
 	c.Retention.DailyDays = 30
 	c.Retention.Rejected = 20
-	c.MailTo = os.Getenv("USER")
 	c.ClaudeResumePath = "" // built-in claude-resume subcommand
 	c.DataDir = DataDir()
 	return c

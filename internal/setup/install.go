@@ -23,6 +23,13 @@ const shutdownUnit = "go-tmux-saver-shutdown.service"
 // enabled+active: the timers plus the shutdown unit.
 var enabledUnits = append(append([]string{}, timerUnits...), shutdownUnit)
 
+// retiredRelUnits are managed unit files that earlier versions installed but
+// this version no longer produces. Update deletes them so upgrading an
+// existing install doesn't leave a stale unit behind. The alert@ unit backed
+// the removed email path (go-tmux-saver no longer notifies out-of-band);
+// nothing references it any more.
+var retiredRelUnits = []string{"systemd/user/go-tmux-saver-alert@.service"}
+
 // WriteFiles atomically writes each of files under dir (ConfigHome-relative
 // Rel paths), creating parent directories as needed (RULING R32: the
 // go-tmux-saver/ directory — which holds the 0600 config.json — is created
@@ -193,13 +200,20 @@ func Update(env Env, files []Managed, dryRun bool) (changed []string, err error)
 		diffs[f.Rel] = diffLines(string(f.Content), string(data))
 	}
 
+	// Delete unit files this version no longer manages (e.g. the removed
+	// alert@ unit), reported alongside the written changes.
+	removed, err := pruneRetired(env, dryRun)
+	if err != nil {
+		return append(changed, removed...), err
+	}
+
 	// The claude-resume link is checked on every Update, including when no
 	// managed file changed — a broken/stale link is drift too.
 	if err := ensureLinkAndReport(env, dryRun); err != nil {
-		return changed, err
+		return append(changed, removed...), err
 	}
 
-	if len(changed) == 0 {
+	if len(changed) == 0 && len(removed) == 0 {
 		return nil, nil
 	}
 
@@ -208,18 +222,54 @@ func Update(env Env, files []Managed, dryRun bool) (changed []string, err error)
 			fmt.Fprintf(env.Stdout, "would update: %s\n", rel)
 			fmt.Fprint(env.Stdout, diffs[rel])
 		}
-		return changed, nil
+		return append(changed, removed...), nil
 	}
 
 	for _, rel := range changed {
 		fmt.Fprintf(env.Stdout, "updating: %s\n", rel)
 	}
-	if err := Install(env, toWrite); err != nil {
-		return changed, err
+	if len(toWrite) > 0 {
+		if err := Install(env, toWrite); err != nil {
+			return append(changed, removed...), err
+		}
+		args := append([]string{"--user", "restart"}, timerUnits...)
+		if _, err := env.Systemctl(args...); err != nil {
+			return append(changed, removed...), fmt.Errorf("setup: restart timers: %w", err)
+		}
+	} else if len(removed) > 0 {
+		// Only retired files were removed — Install (with its daemon-reload)
+		// never ran, but systemd must still forget the deleted unit.
+		if _, err := env.Systemctl("--user", "daemon-reload"); err != nil {
+			return append(changed, removed...), fmt.Errorf("setup: daemon-reload: %w", err)
+		}
 	}
-	args := append([]string{"--user", "restart"}, timerUnits...)
-	if _, err := env.Systemctl(args...); err != nil {
-		return changed, fmt.Errorf("setup: restart timers: %w", err)
+	return append(changed, removed...), nil
+}
+
+// pruneRetired deletes each retiredRelUnits file present under
+// env.ConfigHome. It is best-effort about the systemd side: it disables any
+// lingering instances and clears failed state (ignoring errors — a template
+// unit with no instances has nothing to disable), then removes the file. The
+// caller triggers the daemon-reload that makes systemd forget it. With dryRun
+// it only reports what it would remove.
+func pruneRetired(env Env, dryRun bool) (removed []string, err error) {
+	for _, rel := range retiredRelUnits {
+		full := filepath.Join(env.ConfigHome, rel)
+		if _, statErr := os.Stat(full); statErr != nil {
+			continue // already gone (the common case on a clean install)
+		}
+		removed = append(removed, rel)
+		if dryRun {
+			fmt.Fprintf(env.Stdout, "would remove: %s\n", rel)
+			continue
+		}
+		fmt.Fprintf(env.Stdout, "removing: %s\n", rel)
+		unit := filepath.Base(rel)
+		env.Systemctl("--user", "disable", "--now", unit)
+		env.Systemctl("--user", "reset-failed", unit)
+		if rmErr := os.Remove(full); rmErr != nil && !os.IsNotExist(rmErr) {
+			return removed, fmt.Errorf("setup: remove retired %s: %w", rel, rmErr)
+		}
 	}
-	return changed, nil
+	return removed, nil
 }

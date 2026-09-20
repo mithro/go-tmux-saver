@@ -13,7 +13,6 @@ import (
 
 	"github.com/mithro/go-tmux-saver/internal/collect"
 	"github.com/mithro/go-tmux-saver/internal/config"
-	"github.com/mithro/go-tmux-saver/internal/mail"
 	"github.com/mithro/go-tmux-saver/internal/procs"
 	"github.com/mithro/go-tmux-saver/internal/snapshot"
 	"github.com/mithro/go-tmux-saver/internal/tmuxctl"
@@ -184,99 +183,6 @@ func TestSaveCLIAutoBadSeedSessionErrors(t *testing.T) {
 	}
 	if !strings.Contains(ev[0].Detail, "nonexistent-session") {
 		t.Fatalf("event detail = %q, want it to contain %q (proving the error came from Dial, not Collect)", ev[0].Detail, "nonexistent-session")
-	}
-}
-
-// TestSaveCLIAutoSuccessSendsRecoveryMailWhenMarkerPresent covers the
-// save-success recovery hook: a pre-created rate-limit marker for
-// "go-tmux-saver.service" (as `alert` would have left behind after an
-// earlier failure) must be cleared by a successful `save --auto`
-// (kept/unchanged), sending exactly one recovery mail through the same
-// injectable sender the alert command uses. A second successful save with no
-// marker left must send nothing more.
-func TestSaveCLIAutoSuccessSendsRecoveryMailWhenMarkerPresent(t *testing.T) {
-	s := fakeSendmail(t)
-	sock := tmuxctl.StartTestServer(t)
-	cfgPath := writeConfig(t, `{"mail_to": "ops@example.com"}`)
-	dataDir := t.TempDir()
-
-	rl := mail.RateLimiter{Dir: dataDir}
-	if !rl.ShouldSend("go-tmux-saver.service", time.Now()) {
-		t.Fatal("setup: ShouldSend = false, want true (fresh marker)")
-	}
-
-	var out, errb bytes.Buffer
-	code := Run([]string{"save", "--auto", "--no-display", "--config", cfgPath, "--data-dir", dataDir, "--socket", sock}, &out, &errb)
-	if code != 0 {
-		t.Fatalf("exit %d, want 0; stdout=%q stderr=%q", code, out.String(), errb.String())
-	}
-	if !strings.HasPrefix(out.String(), "kept") {
-		t.Fatalf("stdout = %q, want prefix %q", out.String(), "kept")
-	}
-	if s.count() != 1 {
-		t.Fatalf("sendmail calls = %d, want 1", s.count())
-	}
-	if !strings.Contains(s.last(), "go-tmux-saver.service recovered") || !strings.Contains(s.last(), "To: ops@example.com") {
-		t.Fatalf("message = %q, want a recovered subject for the unit and To: ops@example.com", s.last())
-	}
-	if !strings.Contains(s.last(), "save succeeded:") {
-		t.Fatalf("message = %q, want a body starting with %q", s.last(), "save succeeded:")
-	}
-
-	// The marker is gone now, so a second successful save must not send
-	// another recovery mail.
-	out.Reset()
-	errb.Reset()
-	code = Run([]string{"save", "--auto", "--no-display", "--config", cfgPath, "--data-dir", dataDir, "--socket", sock}, &out, &errb)
-	if code != 0 {
-		t.Fatalf("second save exit %d, want 0; stdout=%q stderr=%q", code, out.String(), errb.String())
-	}
-	if s.count() != 1 {
-		t.Fatalf("sendmail calls after second save = %d, want still 1 (no marker to clear)", s.count())
-	}
-}
-
-// TestSaveCLIAutoSuccessClearsWatchMarkerToo covers C3/RULING R46: the
-// watch unit's alert marker was never cleared by anything, so after the
-// first staleness mail the watchdog went permanently silent. A successful
-// `save --auto` now clears BOTH unit markers and sends one recovery mail
-// per marker that existed — and, the marker being gone, the NEXT failure
-// streak for the watch unit mails again instead of being rate-limited
-// forever.
-func TestSaveCLIAutoSuccessClearsWatchMarkerToo(t *testing.T) {
-	s := fakeSendmail(t)
-	sock := tmuxctl.StartTestServer(t)
-	cfgPath := writeConfig(t, `{"mail_to": "ops@example.com"}`)
-	dataDir := t.TempDir()
-
-	rl := mail.RateLimiter{Dir: dataDir}
-	for _, unit := range []string{alertUnit, watchAlertUnit} {
-		if !rl.ShouldSend(unit, time.Now()) {
-			t.Fatalf("setup: ShouldSend(%s) = false, want true (fresh marker)", unit)
-		}
-	}
-
-	var out, errb bytes.Buffer
-	code := Run([]string{"save", "--auto", "--no-display", "--config", cfgPath, "--data-dir", dataDir, "--socket", sock}, &out, &errb)
-	if code != 0 {
-		t.Fatalf("exit %d, want 0; stdout=%q stderr=%q", code, out.String(), errb.String())
-	}
-	if s.count() != 2 {
-		t.Fatalf("sendmail calls = %d, want 2 (one recovery per cleared marker); bodies=%q", s.count(), s.all())
-	}
-	joined := strings.Join(s.all(), "\n")
-	for _, unit := range []string{alertUnit, watchAlertUnit} {
-		if !strings.Contains(joined, unit+" recovered") {
-			t.Errorf("no recovery mail for %s in:\n%s", unit, joined)
-		}
-		if _, err := os.Stat(filepath.Join(dataDir, "alert-"+unit)); !os.IsNotExist(err) {
-			t.Errorf("marker for %s still present (stat err = %v)", unit, err)
-		}
-	}
-
-	// Marker gone ⇒ the next watch failure is not rate-limited any more.
-	if !rl.ShouldSend(watchAlertUnit, time.Now()) {
-		t.Fatalf("ShouldSend(%s) after a successful save = false; the watchdog would stay silent forever", watchAlertUnit)
 	}
 }
 
@@ -464,34 +370,5 @@ func TestSaveCLIChecksLockBeforeDialing(t *testing.T) {
 	}
 	if len(ev) != 1 || ev[0].Outcome != "skipped" {
 		t.Fatalf("events %+v, want one skipped event", ev)
-	}
-}
-
-// TestClearAlertsBodyIsLazy covers issue #9: the recovery-mail body (which
-// renders status + a 20-event tail) must only be built when a rate-limit
-// marker actually cleared — not on every fresh --check-fresh tick.
-func TestClearAlertsBodyIsLazy(t *testing.T) {
-	dataDir := t.TempDir()
-	calls := 0
-	body := func() string { calls++; return "body" }
-
-	// No markers exist → nothing clears → body never rendered.
-	if errs := clearAlertsAndNotify(dataDir, "h", "root", body, alertUnits); len(errs) != 0 {
-		t.Fatalf("errs = %v", errs)
-	}
-	if calls != 0 {
-		t.Fatalf("body rendered %d times with no markers, want 0", calls)
-	}
-
-	// With a marker present the body IS rendered (once per cleared unit);
-	// sendmail will fail in the test env, which is fine — laziness is the
-	// property under test and the render happens before the send.
-	rl := mail.RateLimiter{Dir: dataDir}
-	if !rl.ShouldSend(alertUnit, time.Now()) {
-		t.Fatal("expected first ShouldSend to create the marker")
-	}
-	clearAlertsAndNotify(dataDir, "h", "root", body, alertUnits)
-	if calls != 1 {
-		t.Fatalf("body rendered %d times with one marker, want 1", calls)
 	}
 }

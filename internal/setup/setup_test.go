@@ -22,7 +22,6 @@ func testParams() Params {
 		SeedSession:     "default",
 		SeedWindow:      "h",
 		IntervalMinutes: 10,
-		MailTo:          "tim",
 	}
 }
 
@@ -172,7 +171,7 @@ func TestRenderGolden(t *testing.T) {
 
 	wantRels := []string{
 		RelService, RelTimer, RelWatchService, RelWatchTimer, RelShutdownService,
-		RelAlertService, RelTmuxDropin, RelTmuxConf, RelConfigJSON,
+		RelTmuxDropin, RelTmuxConf, RelConfigJSON,
 	}
 	if len(files) != len(wantRels) {
 		t.Fatalf("Render returned %d files, want %d", len(files), len(wantRels))
@@ -467,6 +466,90 @@ func TestUpdateDryRunThenApplies(t *testing.T) {
 	if !sawRestart {
 		t.Fatalf("Update must restart both timers; calls = %v", fake.calls)
 	}
+}
+
+// TestUpdatePrunesRetiredAlertUnit covers the upgrade path for an install
+// that still has the removed email alert@ unit on disk: `setup update` must
+// disable it, delete the file, daemon-reload so systemd forgets it, and
+// report it — while a dry-run only says so and leaves the file in place.
+func TestUpdatePrunesRetiredAlertUnit(t *testing.T) {
+	home := t.TempDir()
+	files := renderTestFiles(t)
+	fake := &fakeSystemctl{}
+	env := testEnv(home, fake)
+
+	if err := Install(env, files); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+
+	// Simulate an older install: drop the retired alert@ unit file in place.
+	retired := retiredRelUnits[0]
+	retiredPath := filepath.Join(home, retired)
+	if err := os.WriteFile(retiredPath, []byte("stale alert unit\n"), 0o644); err != nil {
+		t.Fatalf("seed retired unit: %v", err)
+	}
+
+	// Dry-run: reports it, removes nothing, issues no systemctl calls.
+	fake.calls = nil
+	var dryOut bytes.Buffer
+	dryEnv := env
+	dryEnv.Stdout = &dryOut
+	changed, err := Update(dryEnv, files, true)
+	if err != nil {
+		t.Fatalf("Update --dry-run: %v", err)
+	}
+	if !containsRel(changed, retired) {
+		t.Fatalf("dry-run changed = %v, want it to include %s", changed, retired)
+	}
+	if !strings.Contains(dryOut.String(), "would remove: "+retired) {
+		t.Fatalf("dry-run output = %q, want a %q line", dryOut.String(), "would remove: "+retired)
+	}
+	if _, err := os.Stat(retiredPath); err != nil {
+		t.Fatalf("dry-run must not delete the retired unit: %v", err)
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("dry-run must not call Systemctl; calls = %v", fake.calls)
+	}
+
+	// Apply: the file is gone, disable + daemon-reload happened, and it is
+	// reported in changed.
+	fake.calls = nil
+	changed, err = Update(env, files, false)
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if !containsRel(changed, retired) {
+		t.Fatalf("changed = %v, want it to include %s", changed, retired)
+	}
+	if _, err := os.Stat(retiredPath); !os.IsNotExist(err) {
+		t.Fatalf("Update must delete the retired unit (stat err = %v)", err)
+	}
+	unit := filepath.Base(retired)
+	sawDisable, sawReload := false, false
+	for _, c := range fake.calls {
+		joined := strings.Join(c, " ")
+		if strings.Contains(joined, "disable") && strings.Contains(joined, unit) {
+			sawDisable = true
+		}
+		if strings.Contains(joined, "daemon-reload") {
+			sawReload = true
+		}
+	}
+	if !sawDisable {
+		t.Errorf("Update must disable the retired unit %s; calls = %v", unit, fake.calls)
+	}
+	if !sawReload {
+		t.Errorf("Update must daemon-reload after removing a retired unit; calls = %v", fake.calls)
+	}
+}
+
+func containsRel(rels []string, want string) bool {
+	for _, r := range rels {
+		if r == want {
+			return true
+		}
+	}
+	return false
 }
 
 // FINDING 2 — mode: chmod'ing a managed unit away from its rendered mode

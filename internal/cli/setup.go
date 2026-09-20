@@ -142,7 +142,6 @@ func setupParams(cfg config.Config) (setup.Params, error) {
 		SeedSession:     cfg.SeedSession,
 		SeedWindow:      cfg.SeedWindow,
 		IntervalMinutes: cfg.IntervalMinutes,
-		MailTo:          cfg.MailTo,
 	}, nil
 }
 

@@ -31,7 +31,6 @@ const (
 	RelWatchService    = "systemd/user/go-tmux-saver-watch.service"
 	RelWatchTimer      = "systemd/user/go-tmux-saver-watch.timer"
 	RelShutdownService = "systemd/user/go-tmux-saver-shutdown.service"
-	RelAlertService    = "systemd/user/go-tmux-saver-alert@.service"
 	RelTmuxDropin      = "systemd/user/tmux-server.service.d/50-go-tmux-saver.conf"
 	RelTmuxConf        = "go-tmux-saver/tmux.conf"
 	RelConfigJSON      = "go-tmux-saver/config.json"
@@ -52,7 +51,6 @@ type Params struct {
 	SeedSession     string
 	SeedWindow      string
 	IntervalMinutes int
-	MailTo          string
 }
 
 // Managed is one file Render produces: a path relative to Env.ConfigHome,
@@ -87,7 +85,6 @@ var specs = []tmplSpec{
 	{"go-tmux-saver-watch.service.tmpl", RelWatchService, unitMode},
 	{"go-tmux-saver-watch.timer.tmpl", RelWatchTimer, unitMode},
 	{"go-tmux-saver-shutdown.service.tmpl", RelShutdownService, unitMode},
-	{"go-tmux-saver-alert@.service.tmpl", RelAlertService, unitMode},
 	{"tmux-server-dropin.conf.tmpl", RelTmuxDropin, unitMode},
 	{"tmux.conf.tmpl", RelTmuxConf, unitMode},
 }

@@ -162,23 +162,14 @@ func init() {
 			return code
 		}
 
-		rc := RunStatus(stdout, store.Dir, cfg, *asJSON, *checkFresh, *n, time.Now())
-
-		// RULING R46: this is the watch unit's own success path — a
-		// --check-fresh run that finds the last good save fresh. Ending the
-		// watch unit's failure streak here (and mailing one recovery per
-		// cleared marker) is what stops the watchdog going permanently
-		// silent after its first staleness alert. Only --check-fresh does
-		// this: a plain `status` is a read-only query.
-		if *checkFresh && rc == 0 {
-			host, err := os.Hostname()
-			if err != nil {
-				host = "unknown-host"
-			}
-			for _, err := range clearAlertsAndNotify(store.Dir, host, cfg.MailTo, func() string { return alertBody(store.Dir, cfg, 20) }, []string{watchAlertUnit}) {
-				fmt.Fprintln(stderr, "alert: recovery mail:", err)
-			}
-		}
-		return rc
+		// --check-fresh makes RunStatus exit non-zero when the newest good
+		// save is older than watch_stale_factor × the interval. That is the
+		// go-tmux-saver-watch.service unit's whole job: a non-zero exit puts
+		// the unit into `failed` and records it in the journal, where anyone
+		// who wants to act on staleness (mail, a pager, whatever) can hook it
+		// with their own systemd OnFailure= drop-in. go-tmux-saver itself does
+		// not reach out; the human-facing signal is the tmux status-line
+		// freshness indicator.
+		return RunStatus(stdout, store.Dir, cfg, *asJSON, *checkFresh, *n, time.Now())
 	}})
 }

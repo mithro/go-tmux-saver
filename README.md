@@ -8,8 +8,9 @@ tmux-resurrect + tmux-continuum stack, built after that stack failed silently
 on ten64 in several independent ways (see the design doc). Snapshots are
 written atomically to a per-host data directory, with a guard against
 degenerate saves, retention/pruning, and drift-checked systemd `--user` units
-for periodic saving, on-start restore, staleness watching, and failure
-alerting.
+for periodic saving, on-start restore, and staleness watching. It surfaces
+problems in-band — the systemd journal, a `failed` unit, and an in-tmux
+status-line indicator — and never notifies out-of-band.
 
 ## Install / build
 
@@ -109,10 +110,11 @@ split. Off by default; normal output is unchanged.
   go-tmux-saver status --json          # machine-readable (same data, no exit-code change)
   ```
   `--check-fresh` is what the watch unit runs, in text mode: stale ⇒ a
-  `STALE: …` line and exit 1 (which fires the alert unit); fresh ⇒ exit 0,
-  and the watch unit's alert marker is cleared so the next failure streak
-  mails again. `--json` only changes the output format — it can be combined
-  with `--check-fresh`.
+  `STALE: …` line and exit 1, which puts `go-tmux-saver-watch.service` into
+  `failed` and records it in the journal; fresh ⇒ exit 0. That failed unit is
+  the whole signal — go-tmux-saver sends no mail; attach your own systemd
+  `OnFailure=` drop-in to the watch unit if you want one. `--json` only
+  changes the output format — it can be combined with `--check-fresh`.
 
 - **`prune`** — remove snapshots outside the configured retention policy.
   ```sh
@@ -131,12 +133,6 @@ split. Off by default; normal output is unchanged.
   An existing `config.json` is never overwritten by `install`, `generate
   --dir` or `update` — it is yours to edit; delete it to get a fresh
   default. `validate`/`update` exit 1 when drift was found.
-
-- **`alert`** — send a rate-limited sendmail alert for a failed/recovered unit (invoked by the generated `OnFailure=` unit, not normally run by hand).
-  ```sh
-  go-tmux-saver alert --unit go-tmux-saver.service
-  go-tmux-saver alert --unit go-tmux-saver.service --recovered
-  ```
 
 - **`import-resurrect`** — one-time conversion of an existing tmux-resurrect save into a go-tmux-saver snapshot.
   ```sh
@@ -160,7 +156,6 @@ Everything lives under `$XDG_DATA_HOME/go-tmux-saver` (default
 | `rejected/snap-<…>/` | snapshots the degenerate-save guard refused, kept for inspection |
 | `events.log` | append-only, tab-separated: time, outcome, counts, duration, file, detail |
 | `fresh` | empty marker; its mtime is the last good save, and `status --check-fresh` compares against it |
-| `alert-<unit>.service` | rate-limit marker: one alert per failure streak, cleared on recovery |
 | `replay/<run-id>/<pane>.txt` | scrollback a restore `cat`s back into panes; swept by the next restore |
 | `.lock` | flock held for the duration of a save, so two saves never race |
 
@@ -175,7 +170,7 @@ generate` prints.
 | `socket` | `main` | tmux socket name (`tmux -L <socket>`) |
 | `seed_session` / `seed_window` | `default` / `h` | the always-present shell; `restore --on-start` only acts on a server holding nothing but this, and it is never touched by a restore |
 | `interval_minutes` | `10` | the save timer's period (rendered into the timer unit) |
-| `watch_stale_factor` | `3` | staleness limit = `interval_minutes × this`; the email watchdog fires past it, and the in-tmux indicator turns red |
+| `watch_stale_factor` | `3` | staleness limit = `interval_minutes × this`; past it `status --check-fresh` fails `go-tmux-saver-watch.service` and the in-tmux indicator turns red |
 | `warn_stale_factor` | `2` | the in-tmux indicator turns yellow past `interval_minutes × this` (before the red `watch_stale_factor` limit) |
 | `status_indicator` | `true` | show the in-tmux stale-save indicator in the status line (see below) |
 | `allowlist` | see `procs.DefaultAllowlist` | process names a pane's command may be relaunched from; anything else restores as a plain shell |
@@ -186,7 +181,6 @@ generate` prints.
 | `retention.keep` | `50` | recent snapshots always kept |
 | `retention.daily_days` | `30` | days over which one snapshot per day is kept beyond `keep` |
 | `retention.rejected` | `20` | rejected snapshots kept |
-| `mail_to` | `$USER` | recipient for failure/recovery alerts (via `sendmail -t`) |
 | `claude_resume_path` | `""` (built-in) | command typed into restored Claude panes. Empty = the binary's own `claude-resume` subcommand (no extra script needed); set a path to use an external helper instead |
 
 The data directory is derived, not configurable in the file — use
@@ -201,7 +195,7 @@ past the thresholds — yellow at `warn_stale_factor × interval_minutes`, red a
 It is a plain status-line command, `go-tmux-saver freshness --tmux`, re-run
 each `status-interval`; it only stats the last-save marker (no tmux
 connection). This catches a stalled autosave that whoever is at the terminal
-can see, complementing the email watchdog. Set `status_indicator` to `false`
+can see, complementing the watch unit's journal signal. Set `status_indicator` to `false`
 to turn it off (no `setup update` needed). Run `go-tmux-saver freshness` (no
 `--tmux`) for a one-line `fresh`/`warn`/`stale`/`no save` health check.
 
@@ -242,7 +236,7 @@ workstation, or a host like a router where go-tmux-saver runs for real):
 
 ## Status
 
-This is Plan 1 (core tool) — save/restore/status/prune/setup/alert/import are
+This is Plan 1 (core tool) — save/restore/status/prune/setup/import are
 all implemented and tested. Packaging and fleet rollout (a signed apt repo,
 the Ansible role that deploys and enables it, and retiring the old
 tmux-resurrect/tmux-continuum rcfiles config) is **Plan 2**, not yet started.
