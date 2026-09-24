@@ -196,8 +196,6 @@ jobs:
     with:
       suites: "trixie sid"
       architectures: "amd64 arm64 armhf riscv64"
-      origin: go-tmux-saver
       description: "Save and restore tmux sessions"
-      keyring-name: go-tmux-saver.gpg
     secrets:
       gpg-private-key: ${{ secrets.APT_GPG_PRIVATE_KEY }}

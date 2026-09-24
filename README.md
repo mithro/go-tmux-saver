@@ -31,9 +31,9 @@ and refreshes the signed apt repository at <https://mith.ro/go-tmux-saver/>.
 ```sh
 sudo install -d -m0755 /etc/apt/keyrings
 curl -fsSL https://mith.ro/go-tmux-saver/go-tmux-saver.gpg \
-  | sudo tee /etc/apt/keyrings/mithro-go-tmux-saver.gpg > /dev/null
-echo "deb [signed-by=/etc/apt/keyrings/mithro-go-tmux-saver.gpg] https://mith.ro/go-tmux-saver/trixie/ ./" \
-  | sudo tee /etc/apt/sources.list.d/mithro-go-tmux-saver.list
+  | sudo tee /etc/apt/keyrings/go-tmux-saver.gpg > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/go-tmux-saver.gpg] https://mith.ro/go-tmux-saver/trixie/ ./" \
+  | sudo tee /etc/apt/sources.list.d/go-tmux-saver.list
 sudo apt update && sudo apt install go-tmux-saver
 ```
 
