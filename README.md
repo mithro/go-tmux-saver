@@ -12,7 +12,39 @@ for periodic saving, on-start restore, and staleness watching. It surfaces
 problems in-band — the systemd journal, a `failed` unit, and an in-tmux
 status-line indicator — and never notifies out-of-band.
 
-## Install / build
+## Install
+
+From the signed apt repository at <https://mith.ro/go-tmux-saver/>, on Debian
+or Raspberry Pi OS. There is one per suite: `trixie`, `forky` and `sid` for
+amd64, i386, arm64, armhf and riscv64, and `raspbian-trixie` and
+`raspbian-forky` for 32-bit Raspberry Pi OS (ARMv6). Put your suite's name in
+place of `trixie` below:
+
+```sh
+sudo install -d -m0755 /etc/apt/keyrings
+curl -fsSL https://mith.ro/go-tmux-saver/go-tmux-saver.gpg | sudo tee /etc/apt/keyrings/go-tmux-saver.gpg > /dev/null
+echo "deb [signed-by=/etc/apt/keyrings/go-tmux-saver.gpg] https://mith.ro/go-tmux-saver/trixie/ ./" \
+  | sudo tee /etc/apt/sources.list.d/go-tmux-saver.list
+sudo apt update
+sudo apt install go-tmux-saver
+```
+
+The repository's signing key is
+`79A4 32B9 7182 E54E E82B  D171 F97A 944B 18E5 7BEF`
+(`gpg --show-keys /etc/apt/keyrings/go-tmux-saver.gpg` shows it).
+
+The package installs only `/usr/bin/go-tmux-saver`; per-user units,
+keybindings and `config.json` are created by `go-tmux-saver setup install`.
+`go-tmux-saver --version` prints the package's version without its suite
+suffix: `0.17.post3` is `0.17` and 3 commits.
+
+Every push to `main` is a build: the [Debian packages workflow](.github/workflows/deb.yml)
+publishes the packages to the apt repository and to a
+[GitHub Release](https://github.com/mithro/go-tmux-saver/releases) tagged
+`build-<version>`, with the static binaries. `vX.Y` tags are made by hand, when
+the version should change.
+
+### Build
 
 ```sh
 CGO_ENABLED=0 go build -ldflags "-s -w -X github.com/mithro/go-tmux-saver/internal/cli.Version=$(git describe --tags)" -o go-tmux-saver ./cmd/go-tmux-saver
@@ -20,28 +52,6 @@ CGO_ENABLED=0 go build -ldflags "-s -w -X github.com/mithro/go-tmux-saver/intern
 
 Requires Go 1.26+. The binary is self-contained (`CGO_ENABLED=0`); copy it
 anywhere on `$PATH`.
-
-### Install from the apt repository (Debian/Ubuntu, amd64 + arm64)
-
-Every push to `main` builds a release: the [release workflow](.github/workflows/release.yml)
-tags the commit with the next `vX.Y` (unless it is already tagged), builds
-static binaries and `.deb`s, publishes a [GitHub Release](https://github.com/mithro/go-tmux-saver/releases)
-and refreshes the signed apt repository at <https://mith.ro/go-tmux-saver/>.
-
-```sh
-sudo install -d -m0755 /etc/apt/keyrings
-curl -fsSL https://mith.ro/go-tmux-saver/go-tmux-saver.gpg \
-  | sudo tee /etc/apt/keyrings/go-tmux-saver.gpg > /dev/null
-echo "deb [signed-by=/etc/apt/keyrings/go-tmux-saver.gpg] https://mith.ro/go-tmux-saver/trixie/ ./" \
-  | sudo tee /etc/apt/sources.list.d/go-tmux-saver.list
-sudo apt update && sudo apt install go-tmux-saver
-```
-
-On sid, use `https://mith.ro/go-tmux-saver/sid/` instead.
-
-The package installs only `/usr/bin/go-tmux-saver`; per-user units,
-keybindings and `config.json` are created by `go-tmux-saver setup install`.
-`go-tmux-saver version` prints the release tag (`git describe` of the build).
 
 ## Usage
 
