@@ -3,10 +3,12 @@ package resume
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const sid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
@@ -66,6 +68,56 @@ func TestReadMetaAndLabel(t *testing.T) {
 	}
 	if (Meta{}).Label() != "(no summary found)" {
 		t.Fatal("empty label fallback")
+	}
+}
+
+// TestReadMetaModel: the newest real assistant model wins; the
+// "<synthetic>" placeholder Claude writes for local messages never does.
+func TestReadMetaModel(t *testing.T) {
+	projects := writeTranscript(t, "/p",
+		`{"type":"assistant","timestamp":"2026-09-29T01:00:00Z","message":{"model":"claude-opus-5"}}`,
+		`{"type":"assistant","timestamp":"2026-09-29T02:00:00Z","message":{"model":"claude-opus-5-5"}}`,
+		`{"type":"assistant","timestamp":"2026-09-29T03:00:00Z","message":{"model":"<synthetic>"}}`,
+	)
+	m, _ := ReadMeta(FindTranscript(projects, sid))
+	if m.Model != "claude-opus-5-5" {
+		t.Fatalf("Model = %q", m.Model)
+	}
+}
+
+// queueOp renders one transcript queue-operation entry at 2026-09-29T00:00:<sec>Z.
+func queueOp(op string, sec int) string {
+	return fmt.Sprintf(`{"type":"queue-operation","operation":%q,"timestamp":"2026-09-29T00:00:%02dZ"}`, op, sec)
+}
+
+// TestQueued replays the input queue: enqueue adds, dequeue (sent to the
+// model) and remove (deleted) take one, popAll (queued text pulled back into
+// the input box) empties it. Ops before `since` belong to an earlier process
+// of the same session — the queue is in-memory, so they are ignored.
+func TestQueued(t *testing.T) {
+	since := time.Date(2026, 9, 29, 0, 0, 10, 0, time.UTC)
+	cases := []struct {
+		name string
+		ops  []string
+		want int
+	}{
+		{"one pending", []string{queueOp("enqueue", 11), queueOp("enqueue", 12), queueOp("dequeue", 13)}, 1},
+		{"removed", []string{queueOp("enqueue", 11), queueOp("remove", 12)}, 0},
+		{"popAll empties", []string{queueOp("enqueue", 11), queueOp("enqueue", 12), queueOp("popAll", 13)}, 0},
+		{"pre-start ops ignored", []string{queueOp("enqueue", 1), queueOp("enqueue", 2), queueOp("enqueue", 11)}, 1},
+		{"dequeue never negative", []string{queueOp("dequeue", 11), queueOp("enqueue", 12)}, 1},
+		{"no queue", nil, 0},
+	}
+	for _, c := range cases {
+		projects := writeTranscript(t, "/p", append([]string{`{"type":"user","timestamp":"2026-09-29T00:00:00Z"}`}, c.ops...)...)
+		m, _ := ReadMeta(FindTranscript(projects, sid))
+		if got := m.Queued(since); got != c.want {
+			t.Errorf("%s: Queued = %d, want %d", c.name, got, c.want)
+		}
+		// Queue bookkeeping must not count as conversation activity.
+		if m.LastTS != "2026-09-29T00:00:00Z" {
+			t.Errorf("%s: LastTS = %q, want the user turn's", c.name, m.LastTS)
+		}
 	}
 }
 

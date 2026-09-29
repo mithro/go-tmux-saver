@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 var uuidRe = regexp.MustCompile(`\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z`)
@@ -40,6 +41,42 @@ type Meta struct {
 	Summary, Title, FirstUser  string
 	LaunchCwd, WorkCwd, Branch string
 	LastTS                     string
+	// Model is the model of the newest real assistant message.
+	Model string
+	// Queue is the transcript's input-queue log, oldest first (see Queued).
+	Queue []QueueOp
+}
+
+// QueueOp is one `queue-operation` transcript entry: Claude Code logs its
+// in-memory input queue — messages that arrived while it couldn't take them
+// (mid-turn, or a dialog open) — as enqueue / dequeue / remove / popAll.
+type QueueOp struct {
+	Op string
+	TS time.Time
+}
+
+// Queued is how many messages are waiting in the input queue: enqueue adds
+// one, dequeue (sent to the model) and remove (deleted) take one, popAll
+// (queued text pulled back into the input box for editing) empties it. Only
+// ops at or after since — the running process's start — count: the queue is
+// in-memory, so a --resume starts empty while the transcript keeps the
+// previous process's unmatched enqueues. Prompt suggestions never enter it.
+func (m Meta) Queued(since time.Time) int {
+	n := 0
+	for _, q := range m.Queue {
+		if q.TS.Before(since) {
+			continue
+		}
+		switch q.Op {
+		case "enqueue":
+			n++
+		case "dequeue", "remove":
+			n = max(0, n-1)
+		case "popAll":
+			n = 0
+		}
+	}
+	return n
 }
 
 // ReadMeta scans a transcript's JSONL for a label and the launch cwd.
@@ -61,6 +98,7 @@ func ReadMeta(path string) (Meta, bool) {
 		}
 		var o struct {
 			Type        string `json:"type"`
+			Operation   string `json:"operation"`
 			Cwd         string `json:"cwd"`
 			GitBranch   string `json:"gitBranch"`
 			Timestamp   string `json:"timestamp"`
@@ -69,10 +107,20 @@ func ReadMeta(path string) (Meta, bool) {
 			CustomTitle string `json:"customTitle"`
 			Message     struct {
 				Content json.RawMessage `json:"content"`
+				Model   string          `json:"model"`
 			} `json:"message"`
 		}
 		if json.Unmarshal([]byte(line), &o) != nil {
 			continue
+		}
+		if o.Type == "queue-operation" {
+			if ts, err := time.Parse(time.RFC3339Nano, o.Timestamp); err == nil {
+				m.Queue = append(m.Queue, QueueOp{Op: o.Operation, TS: ts})
+			}
+			continue
+		}
+		if o.Type == "assistant" && o.Message.Model != "" && o.Message.Model != "<synthetic>" {
+			m.Model = o.Message.Model
 		}
 		if o.Cwd != "" {
 			if m.LaunchCwd == "" {
