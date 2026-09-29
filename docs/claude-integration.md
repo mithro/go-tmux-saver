@@ -75,15 +75,22 @@ the placeholder, on demand.
 
 For each Claude pane in the target window it:
 
-1. captures the pane's scrollback to `<data-dir>/suspend/` (the future
+1. **checks the pane is safe to type into**: the visible screen must end in
+   Claude's input box — a rule, an *empty* `❯` line, a rule — with no turn
+   running (`esc to interrupt`). An unsent draft would otherwise be
+   submitted with `/exit` appended, and in an open dialog Enter would pick
+   the highlighted option. Anything else is reported (`input box not empty
+   or a dialog is open — not suspended`), counted as failed, and left
+   untouched,
+2. captures the pane's scrollback to `<data-dir>/suspend/` (the future
    placeholder's `--saved-output`),
-2. types `/exit` — text first, Enter after a beat, so Claude's
+3. types `/exit` — text first, Enter after a beat, so Claude's
    slash-command palette has settled,
-3. **confirms Claude actually exited** by polling `/proc` for the process,
+4. **confirms Claude actually exited** by polling `/proc` for the process,
    bounded by `--exit-timeout` (default 30 s). On timeout the pane is
    reported and left running — never force-killed, and the placeholder is
    never typed into a live session,
-4. types ` claude-resume <session-id> --saved-output <capture>` into the
+5. types ` claude-resume <session-id> --saved-output <capture>` into the
    now-shell pane.
 
 Target forms:
