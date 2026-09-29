@@ -45,6 +45,9 @@ type SuspendDeps struct {
 	Now         func() time.Time
 	// DryRun reports what would be suspended without touching any pane.
 	DryRun bool
+	// VersionsDir holds one entry per installed Claude Code version
+	// (~/.local/share/claude/versions) — --status flags sessions behind it.
+	VersionsDir string
 }
 
 // lastTurn is when session sid last had a user or assistant entry in its
@@ -381,6 +384,8 @@ func init() {
 		exitTimeout := fs.Duration("exit-timeout", 30*time.Second, "how long to wait for Claude to exit after /exit")
 		idleFor := fs.Duration("idle-for", 0, "only suspend sessions whose last user/assistant turn is at least this old (e.g. 48h)")
 		dryRun := fs.Bool("dry-run", false, "list the Claude panes that would be suspended; touch nothing")
+		status := fs.Bool("status", false, "print a status table of the Claude sessions (all windows if none named); touch nothing")
+		showResume := fs.Bool("show-resume", false, "with --status: add the (wide) `claude --resume` command column")
 		socket := fs.String("socket", "", "override config socket")
 		dataDir := fs.String("data-dir", "", "override config data dir")
 		cfgPath := fs.String("config", config.Path(), "config file")
@@ -389,8 +394,19 @@ func init() {
 			return 2
 		}
 		pos := fs.Args()
+		if *status && len(pos) == 0 {
+			*all = true
+		}
 		if !*all && len(pos) == 0 || len(pos) > 2 {
-			fmt.Fprintln(stderr, "usage: claude-suspend [--idle-for D] [--dry-run] ([<session>] <window> | --all)")
+			fmt.Fprintln(stderr, "usage: claude-suspend [--idle-for D] [--dry-run] ([<session>] <window> | --all)\n       claude-suspend --status [--show-resume] [[<session>] <window> | --all]")
+			return 2
+		}
+		if *status && (*idleFor != 0 || *dryRun) {
+			fmt.Fprintln(stderr, "claude-suspend: --status is read-only; --idle-for/--dry-run are for suspending")
+			return 2
+		}
+		if *showResume && !*status {
+			fmt.Fprintln(stderr, "claude-suspend: --show-resume needs --status")
 			return 2
 		}
 
@@ -436,6 +452,14 @@ func init() {
 			Out:      stdout, Sleep: time.Sleep, ExitTimeout: *exitTimeout,
 			IdleFor: *idleFor, ProjectsDir: filepath.Join(home, ".claude", "projects"),
 			Now: time.Now, DryRun: *dryRun,
+			VersionsDir: filepath.Join(home, ".local", "share", "claude", "versions"),
+		}
+		if *status {
+			if err := RunClaudeStatus(ctx, d, sessArg, winArg, *all, *showResume); err != nil {
+				fmt.Fprintln(stderr, "claude-suspend:", err)
+				return 1
+			}
+			return 0
 		}
 		done, failed, err := RunSuspend(ctx, d, sessArg, winArg, *all)
 		if err != nil {
