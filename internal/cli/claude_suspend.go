@@ -64,6 +64,55 @@ func claudeInPane(tb *procs.Table, reg procs.ClaudeRegistry, allowlist []string,
 	return "", 0, false
 }
 
+// isInputRule reports whether a screen line is one of the horizontal rules
+// that frame Claude's input box (the top one may carry a session title).
+func isInputRule(line string) bool {
+	t := strings.TrimSpace(line)
+	return strings.HasPrefix(t, "─") && strings.HasSuffix(t, "─")
+}
+
+// promptBlocker inspects the visible screen of a Claude pane and returns ""
+// only when /exit can be typed safely: Claude idle at an EMPTY input box.
+// Otherwise it names the reason. Typing into anything else destroys work:
+// a draft would be submitted with /exit appended (issue #42), and in an
+// open dialog Enter picks the highlighted option.
+func promptBlocker(screen []string) string {
+	last := -1
+	for i, l := range screen {
+		if strings.Contains(l, "esc to interrupt") {
+			return "Claude is mid-turn"
+		}
+		if strings.HasPrefix(strings.TrimLeft(l, " "), "❯") {
+			last = i
+		}
+	}
+	if last < 0 {
+		return "no Claude input box on screen"
+	}
+	// The input box is exactly: rule, one ❯ line, rule. A multi-line draft
+	// or a dialog (whose ❯ marks the highlighted option) breaks the frame.
+	if last == 0 || last == len(screen)-1 || !isInputRule(screen[last-1]) || !isInputRule(screen[last+1]) {
+		return "input box not empty or a dialog is open"
+	}
+	if strings.TrimSpace(strings.TrimPrefix(strings.TrimLeft(screen[last], " "), "❯")) != "" {
+		return "input box not empty"
+	}
+	return ""
+}
+
+// checkPrompt captures the pane's visible screen and refuses to proceed
+// unless promptBlocker finds it safe.
+func checkPrompt(ctx context.Context, t tmuxctl.Transport, paneID string) error {
+	screen, err := t.Run(ctx, fmt.Sprintf("capture-pane -p -t %s", tmuxctl.Quote(paneID)))
+	if err != nil {
+		return fmt.Errorf("capture-pane: %w", err)
+	}
+	if b := promptBlocker(screen); b != "" {
+		return fmt.Errorf("%s — not suspended", b)
+	}
+	return nil
+}
+
 // suspendPane parks one pane's running Claude behind the placeholder:
 // capture scrollback → type /exit → confirm the claude process is gone →
 // type the placeholder with the capture as --saved-output.
@@ -177,6 +226,11 @@ func suspendWindow(ctx context.Context, d SuspendDeps, tb *procs.Table, sess str
 			continue
 		}
 		target := fmt.Sprintf("%s:%d %s", sess, winIdx, p[0])
+		if err := checkPrompt(ctx, d.T, p[0]); err != nil {
+			fmt.Fprintf(d.Out, "error: %s: %v\n", target, err)
+			failed++
+			continue
+		}
 		if err := suspendPane(ctx, d, target, p[0], sid, claudePID); err != nil {
 			fmt.Fprintf(d.Out, "error: %s: %v\n", target, err)
 			failed++

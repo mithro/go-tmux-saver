@@ -62,10 +62,61 @@ func suspendFake() *tmuxctl.Fake {
 			"list-panes -t \"=default:1\" -F \"#{pane_id}\t#{pane_pid}\"":      {"%5\t100"},
 			"list-windows -t \"=default\" -F \"#{window_index}\t#{window_name}\"": {"0\th", "1\trcfiles"},
 			"capture-pane -epJ -S - -t \"%5\"":                               {"old console line 1", "old console line 2"},
+			"capture-pane -p -t \"%5\"":                                      screenEmptyPrompt,
 		},
 		Default: []string{},
 	}
 }
+
+// Visible-screen fixtures, shaped like real Claude Code 2.1.283 panes.
+var (
+	// Idle at an empty input box (the only state safe to type /exit into).
+	screenEmptyPrompt = []string{
+		"● Filed it: https://github.com/example/repo/issues/4",
+		"",
+		"────────────────────────────────────────────── go-tmux-restore ─",
+		"❯ ",
+		"──────────────────────────────────────────────────────────────────",
+		"  ⏵⏵ auto mode on (shift+tab to cycle)                115426 tokens",
+	}
+	// An unsent draft in the input box (issue #42).
+	screenDraft = []string{
+		"────────────────────────────────────────────── go-tmux-restore ─",
+		"❯ What is the current state of things?",
+		"──────────────────────────────────────────────────────────────────",
+		"  ⏵⏵ auto mode on (shift+tab to cycle)",
+	}
+	// A multi-line draft: the rule doesn't follow the ❯ line.
+	screenDraftMultiline = []string{
+		"──────────────────────────────────────────────────────────────────",
+		"❯ first line of a draft",
+		"  second line of a draft",
+		"──────────────────────────────────────────────────────────────────",
+	}
+	// An open AskUserQuestion dialog: Enter would pick the highlighted option.
+	screenDialog = []string{
+		"──────────────────────────────────────────────────────────────────",
+		" ☐ Preserve first",
+		"",
+		"How should I preserve the uncommitted work?",
+		"",
+		"  1. Commit to a WIP branch",
+		"❯ 3. Show me the diff first",
+		"",
+		"──────────────────────────────────────────────────────────────────",
+		"❯ Chat about this",
+		"",
+		"Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel",
+	}
+	// Mid-turn: a queued /exit would run after the turn or merge into input.
+	screenBusy = []string{
+		"✻ Crunching… (12s · esc to interrupt)",
+		"",
+		"──────────────────────────────────────────────────────────────────",
+		"❯ ",
+		"──────────────────────────────────────────────────────────────────",
+	}
+)
 
 // TestRunSuspendByIndex: the full happy path — capture, /exit + Enter,
 // exit confirmed on the second Scan, placeholder typed with the capture
@@ -124,6 +175,51 @@ func TestRunSuspendConfirmFailure(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "still running") {
 		t.Fatalf("output = %q, want the still-running error", out.String())
+	}
+}
+
+// TestPromptBlocker: only an empty input box with Claude idle is safe.
+func TestPromptBlocker(t *testing.T) {
+	cases := []struct {
+		name   string
+		screen []string
+		want   string // substring of the blocker; "" = safe
+	}{
+		{"empty prompt", screenEmptyPrompt, ""},
+		{"draft", screenDraft, "input box not empty"},
+		{"multi-line draft", screenDraftMultiline, "input box not empty or a dialog is open"},
+		{"dialog", screenDialog, "input box not empty or a dialog is open"},
+		{"mid-turn", screenBusy, "mid-turn"},
+		{"no input box", []string{"$ ls", "foo bar"}, "no Claude input box"},
+		{"blank screen", nil, "no Claude input box"},
+	}
+	for _, c := range cases {
+		got := promptBlocker(c.screen)
+		if c.want == "" && got != "" || c.want != "" && !strings.Contains(got, c.want) {
+			t.Errorf("%s: promptBlocker = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// TestRunSuspendRefusesUnsafeScreen: a draft, dialog or running turn means
+// no key reaches the pane, no capture is written, and the pane counts as
+// failed with the reason (issue #42).
+func TestRunSuspendRefusesUnsafeScreen(t *testing.T) {
+	for name, screen := range map[string][]string{"draft": screenDraft, "dialog": screenDialog, "busy": screenBusy} {
+		f := suspendFake()
+		f.Replies["capture-pane -p -t \"%5\""] = screen
+		d, out := suspendFixture(t, f, true)
+		done, failed, err := RunSuspend(context.Background(), d, "default", "1", false)
+		if err != nil || done != 0 || failed != 1 {
+			t.Fatalf("%s: done=%d failed=%d err=%v\n%s", name, done, failed, err, out.String())
+		}
+		joined := strings.Join(f.Calls, "\n")
+		if strings.Contains(joined, "send-keys") || strings.Contains(joined, "capture-pane -epJ") {
+			t.Fatalf("%s: pane must not be touched:\n%s", name, joined)
+		}
+		if !strings.Contains(out.String(), "not suspended") {
+			t.Fatalf("%s: output = %q", name, out.String())
+		}
 	}
 }
 
