@@ -47,7 +47,7 @@ the version should change.
 ### Build
 
 ```sh
-CGO_ENABLED=0 go build -ldflags "-s -w -X github.com/mithro/go-tmux-saver/internal/cli.Version=$(git describe --tags)" -o go-tmux-saver ./cmd/go-tmux-saver
+CGO_ENABLED=0 go build -ldflags "-s -w -X github.com/mithro/go-tmux-saver/internal/cli.Version=$(git describe --tags --match 'v[0-9]*')" -o go-tmux-saver ./cmd/go-tmux-saver
 ```
 
 Requires Go 1.26+. The binary is self-contained (`CGO_ENABLED=0`); copy it
