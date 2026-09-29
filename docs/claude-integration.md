@@ -125,10 +125,14 @@ no turn yet is skipped, since resuming it would fail with "No conversation
 found". Every skipped pane is reported with its reason (`active 3h0m0s
 ago`, `no transcript or no turn yet`).
 
-`--dry-run` works with or without `--idle-for`. Check its list before a
-sweep: an unsent draft in a candidate's input box would be submitted along
-with `/exit` (#42), and a `claude --worktree` session stops at the
-keep/remove-worktree dialog (#43).
+The idle filter runs before the input-box check, so busy active sessions
+are skipped as active rather than reported as mid-turn failures.
+
+`--dry-run` works with or without `--idle-for`. It still runs the
+read-only input-box check, so a candidate holding a draft or parked on a
+dialog shows up as a failure exactly as a real run would treat it. One
+known gap: a `claude --worktree` session stops at the keep/remove-worktree
+dialog after `/exit` and times out, leaving the pane mid-dialog (#43).
 
 ## The ~/bin/claude-resume symlink
 
