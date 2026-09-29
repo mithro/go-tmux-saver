@@ -107,7 +107,8 @@ split. Off by default; normal output is unchanged.
   **`claude-resume`** placeholder into each such pane (project, branch and
   a one-line summary above an Enter-to-resume prompt — no stampede of N
   relaunched Claudes), and **`claude-suspend`** parks a *running* session
-  behind that same placeholder on demand (`/exit`, confirm, re-type).
+  behind that same placeholder on demand (`/exit`, confirm, re-type) —
+  or, with `--all --idle-for 48h`, every session idle that long.
   `setup` manages `~/bin/claude-resume` as a symlink to the binary so the
   historical name keeps working with no external script. Full details,
   target forms, the symlink's strict replace-only-known rules, worktree

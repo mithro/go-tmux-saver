@@ -14,6 +14,7 @@ import (
 	"github.com/mithro/go-tmux-saver/internal/config"
 	"github.com/mithro/go-tmux-saver/internal/procs"
 	"github.com/mithro/go-tmux-saver/internal/restore"
+	"github.com/mithro/go-tmux-saver/internal/resume"
 	"github.com/mithro/go-tmux-saver/internal/tmuxctl"
 )
 
@@ -35,6 +36,52 @@ type SuspendDeps struct {
 	Out         io.Writer
 	Sleep       func(time.Duration)
 	ExitTimeout time.Duration
+	// IdleFor, when > 0, restricts suspension to sessions whose last
+	// user/assistant turn is at least this old (issue #46). ProjectsDir is
+	// where their transcripts live (~/.claude/projects); Now is the clock.
+	IdleFor     time.Duration
+	ProjectsDir string
+	Now         func() time.Time
+	// DryRun reports what would be suspended without touching any pane.
+	DryRun bool
+}
+
+// lastTurn is when session sid last had a user or assistant entry in its
+// transcript. The transcript's mtime is useless for this: /remote-control
+// appends bridge/system entries to every open session. ok=false when there
+// is no transcript or no turn yet (a never-messaged session).
+func lastTurn(projectsDir, sid string) (time.Time, bool) {
+	path := resume.FindTranscript(projectsDir, sid)
+	if path == "" {
+		return time.Time{}, false
+	}
+	m, ok := resume.ReadMeta(path)
+	if !ok || m.LastTS == "" {
+		return time.Time{}, false
+	}
+	ts, err := time.Parse(time.RFC3339Nano, m.LastTS)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return ts, true
+}
+
+// idleGate decides whether a Claude pane passes the --idle-for filter. It
+// returns a short note for the report line: the idle age when it passes,
+// the reason when it doesn't.
+func idleGate(d SuspendDeps, sid string) (pass bool, note string) {
+	if d.IdleFor <= 0 {
+		return true, ""
+	}
+	ts, ok := lastTurn(d.ProjectsDir, sid)
+	if !ok {
+		return false, "no transcript or no turn yet"
+	}
+	age := d.Now().Sub(ts).Round(time.Minute)
+	if age < d.IdleFor {
+		return false, fmt.Sprintf("active %s ago", age)
+	}
+	return true, fmt.Sprintf("idle %s", age)
 }
 
 // shellArgQuote renders argv as a single-quoted, space-joined string safe
@@ -226,9 +273,23 @@ func suspendWindow(ctx context.Context, d SuspendDeps, tb *procs.Table, sess str
 			continue
 		}
 		target := fmt.Sprintf("%s:%d %s", sess, winIdx, p[0])
+		// Idle filter first: an active session is often mid-turn, and that
+		// is a skip, not a prompt-guard failure.
+		pass, note := idleGate(d, sid)
+		if !pass {
+			fmt.Fprintf(d.Out, "skip %s (%s…): %s\n", target, sid[:8], note)
+			continue
+		}
+		// The prompt guard only reads the screen, so a dry run reports the
+		// panes a real run would refuse.
 		if err := checkPrompt(ctx, d.T, p[0]); err != nil {
 			fmt.Fprintf(d.Out, "error: %s: %v\n", target, err)
 			failed++
+			continue
+		}
+		if d.DryRun {
+			fmt.Fprintf(d.Out, "would suspend %s (%s…) %s\n", target, sid[:8], note)
+			done++
 			continue
 		}
 		if err := suspendPane(ctx, d, target, p[0], sid, claudePID); err != nil {
@@ -291,6 +352,8 @@ func init() {
 		fs := flag.NewFlagSet("claude-suspend", flag.ContinueOnError)
 		all := fs.Bool("all", false, "suspend every Claude session in every window of every session group")
 		exitTimeout := fs.Duration("exit-timeout", 30*time.Second, "how long to wait for Claude to exit after /exit")
+		idleFor := fs.Duration("idle-for", 0, "only suspend sessions whose last user/assistant turn is at least this old (e.g. 48h)")
+		dryRun := fs.Bool("dry-run", false, "list the Claude panes that would be suspended; touch nothing")
 		socket := fs.String("socket", "", "override config socket")
 		dataDir := fs.String("data-dir", "", "override config data dir")
 		cfgPath := fs.String("config", config.Path(), "config file")
@@ -300,7 +363,7 @@ func init() {
 		}
 		pos := fs.Args()
 		if !*all && len(pos) == 0 || len(pos) > 2 {
-			fmt.Fprintln(stderr, "usage: claude-suspend [<session>] <window> | claude-suspend --all")
+			fmt.Fprintln(stderr, "usage: claude-suspend [--idle-for D] [--dry-run] ([<session>] <window> | --all)")
 			return 2
 		}
 
@@ -344,13 +407,19 @@ func init() {
 			Allowlist: cfg.Allowlist, Exe: exe,
 			SavedDir: filepath.Join(store.Dir, "suspend"),
 			Out:      stdout, Sleep: time.Sleep, ExitTimeout: *exitTimeout,
+			IdleFor: *idleFor, ProjectsDir: filepath.Join(home, ".claude", "projects"),
+			Now: time.Now, DryRun: *dryRun,
 		}
 		done, failed, err := RunSuspend(ctx, d, sessArg, winArg, *all)
 		if err != nil {
 			fmt.Fprintln(stderr, "claude-suspend:", err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "suspended %d, failed %d\n", done, failed)
+		verb := "suspended"
+		if *dryRun {
+			verb = "would suspend"
+		}
+		fmt.Fprintf(stdout, "%s %d, failed %d\n", verb, done, failed)
 		if failed > 0 {
 			return 1
 		}
