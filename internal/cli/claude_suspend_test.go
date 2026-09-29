@@ -223,6 +223,128 @@ func TestRunSuspendRefusesUnsafeScreen(t *testing.T) {
 	}
 }
 
+// idleNow is the fixed clock for the --idle-for tests.
+var idleNow = time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+
+// writeTranscript puts a <projects>/<slug>/<suspendSID>.jsonl holding the
+// given JSONL lines and returns the projects dir.
+func writeTranscript(t *testing.T, lines ...string) string {
+	t.Helper()
+	projects := t.TempDir()
+	dir := filepath.Join(projects, "-home-u-proj")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data := strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(dir, suspendSID+".jsonl"), []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return projects
+}
+
+// turn renders one transcript entry of the given type at now-ago.
+func turn(typ string, ago time.Duration) string {
+	return `{"type":"` + typ + `","cwd":"/home/u/proj","timestamp":"` + idleNow.Add(-ago).Format(time.RFC3339Nano) + `"}`
+}
+
+// TestRunSuspendIdleSkipsActive: last turn 1h ago, --idle-for 48h → left
+// alone, nothing typed, and the reason is reported.
+func TestRunSuspendIdleSkipsActive(t *testing.T) {
+	f := suspendFake()
+	d, out := suspendFixture(t, f, true)
+	d.ProjectsDir = writeTranscript(t, turn("user", 50*time.Hour), turn("assistant", time.Hour))
+	d.Now = func() time.Time { return idleNow }
+	d.IdleFor = 48 * time.Hour
+	done, failed, err := RunSuspend(context.Background(), d, "default", "1", false)
+	if err != nil || done != 0 || failed != 0 {
+		t.Fatalf("done=%d failed=%d err=%v\n%s", done, failed, err, out.String())
+	}
+	if strings.Contains(strings.Join(f.Calls, "\n"), "send-keys") {
+		t.Fatalf("active session must not be touched:\n%s", strings.Join(f.Calls, "\n"))
+	}
+	if !strings.Contains(out.String(), "skip default:1 %5") || !strings.Contains(out.String(), "active 1h0m0s ago") {
+		t.Fatalf("output = %q", out.String())
+	}
+}
+
+// TestRunSuspendIdleSuspendsIdle: last turn 72h ago → suspended. A later
+// non-turn entry (remote-control/system bookkeeping) must not count as use.
+func TestRunSuspendIdleSuspendsIdle(t *testing.T) {
+	f := suspendFake()
+	d, out := suspendFixture(t, f, true)
+	d.ProjectsDir = writeTranscript(t, turn("user", 73*time.Hour), turn("assistant", 72*time.Hour), turn("system", time.Minute))
+	d.Now = func() time.Time { return idleNow }
+	d.IdleFor = 48 * time.Hour
+	done, failed, err := RunSuspend(context.Background(), d, "default", "1", false)
+	if err != nil || done != 1 || failed != 0 {
+		t.Fatalf("done=%d failed=%d err=%v\n%s", done, failed, err, out.String())
+	}
+	if !strings.Contains(strings.Join(f.Calls, "\n"), "claude-resume") {
+		t.Fatalf("idle session should get the placeholder:\n%s", strings.Join(f.Calls, "\n"))
+	}
+}
+
+// TestRunSuspendIdleNoTranscript: a never-messaged session has no
+// transcript; parking it would leave an unresumable placeholder → skip.
+func TestRunSuspendIdleNoTranscript(t *testing.T) {
+	f := suspendFake()
+	d, out := suspendFixture(t, f, true)
+	d.ProjectsDir = t.TempDir()
+	d.Now = func() time.Time { return idleNow }
+	d.IdleFor = 48 * time.Hour
+	done, failed, err := RunSuspend(context.Background(), d, "default", "1", false)
+	if err != nil || done != 0 || failed != 0 {
+		t.Fatalf("done=%d failed=%d err=%v\n%s", done, failed, err, out.String())
+	}
+	if !strings.Contains(out.String(), "no transcript") {
+		t.Fatalf("output = %q", out.String())
+	}
+}
+
+// TestRunSuspendDryRun: candidates are listed with their idle age; only the
+// read-only visible-screen check runs — no scrollback capture, no keys.
+func TestRunSuspendDryRun(t *testing.T) {
+	f := suspendFake()
+	d, out := suspendFixture(t, f, true)
+	d.ProjectsDir = writeTranscript(t, turn("assistant", 72*time.Hour))
+	d.Now = func() time.Time { return idleNow }
+	d.IdleFor = 48 * time.Hour
+	d.DryRun = true
+	done, failed, err := RunSuspend(context.Background(), d, "default", "1", false)
+	if err != nil || done != 1 || failed != 0 {
+		t.Fatalf("done=%d failed=%d err=%v\n%s", done, failed, err, out.String())
+	}
+	joined := strings.Join(f.Calls, "\n")
+	if strings.Contains(joined, "send-keys") || strings.Contains(joined, "capture-pane -epJ") {
+		t.Fatalf("dry run must not touch the pane:\n%s", joined)
+	}
+	if files, _ := filepath.Glob(filepath.Join(d.SavedDir, "*")); len(files) != 0 {
+		t.Fatalf("dry run wrote %v", files)
+	}
+	if !strings.Contains(out.String(), "would suspend default:1 %5") || !strings.Contains(out.String(), "idle 72h0m0s") {
+		t.Fatalf("output = %q", out.String())
+	}
+}
+
+// TestRunSuspendDryRunReportsUnsafeScreen: an idle pane parked on a dialog
+// shows up in the dry run as a failure, exactly as a real run would treat it.
+func TestRunSuspendDryRunReportsUnsafeScreen(t *testing.T) {
+	f := suspendFake()
+	f.Replies["capture-pane -p -t \"%5\""] = screenDialog
+	d, out := suspendFixture(t, f, true)
+	d.ProjectsDir = writeTranscript(t, turn("assistant", 72*time.Hour))
+	d.Now = func() time.Time { return idleNow }
+	d.IdleFor = 48 * time.Hour
+	d.DryRun = true
+	done, failed, err := RunSuspend(context.Background(), d, "default", "1", false)
+	if err != nil || done != 0 || failed != 1 {
+		t.Fatalf("done=%d failed=%d err=%v\n%s", done, failed, err, out.String())
+	}
+	if !strings.Contains(out.String(), "dialog is open") {
+		t.Fatalf("output = %q", out.String())
+	}
+}
+
 // TestRunSuspendAll sweeps every canonical window; non-claude panes are
 // silently skipped.
 func TestRunSuspendAll(t *testing.T) {
