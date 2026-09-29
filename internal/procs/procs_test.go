@@ -1,6 +1,9 @@
 package procs
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestScanAndSubtree(t *testing.T) {
 	tb, err := Scan("testdata/proc")
@@ -47,6 +50,28 @@ func TestClaudeRegistry(t *testing.T) {
 	}
 	if _, ok := reg.SessionFor(Proc{PID: 777}); ok {
 		t.Fatal("missing registry file must not match")
+	}
+}
+
+// TestClaudeRegistryEntry: the full session record, behind the same
+// procStart check as SessionFor.
+func TestClaudeRegistryEntry(t *testing.T) {
+	reg := ClaudeRegistry{Dir: "testdata/sessions"}
+	tb, _ := Scan("testdata/proc")
+	p, _ := tb.Get(101)
+	e, ok := reg.Entry(p)
+	want := ClaudeSession{
+		SessionID: "11111111-2222-3333-4444-555555555555", Name: "rcfiles-work",
+		Status: "idle", Version: "2.1.284", Cwd: "/home/u/proj",
+		StartedAt: time.UnixMilli(1790661514767),
+	}
+	if !ok || e.SessionID != want.SessionID || e.Name != want.Name || e.Status != want.Status ||
+		e.Version != want.Version || e.Cwd != want.Cwd || !e.StartedAt.Equal(want.StartedAt) {
+		t.Fatalf("Entry = %+v ok=%v, want %+v", e, ok, want)
+	}
+	p.StartTime = "9999"
+	if _, ok := reg.Entry(p); ok {
+		t.Fatal("stale procStart must not match")
 	}
 }
 

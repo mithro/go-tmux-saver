@@ -134,6 +134,35 @@ dialog shows up as a failure exactly as a real run would treat it. One
 known gap: a `claude --worktree` session stops at the keep/remove-worktree
 dialog after `/exit` and times out, leaving the pane mid-dialog (#43).
 
+### Session status
+
+`--status` prints one row per Claude pane and touches nothing. With no
+window named it covers the whole server; the target forms above narrow it.
+
+```console
+$ claude-suspend --status
+window     name                      status   rc         version      model     queued  idle
+default:3  local-5e                  busy     connected  2.1.284      Opus 5.5  -       19s
+fo-live:2  rp1-jtag status checking  waiting  off        2.1.283 OLD  Opus 5    1       2d06h
+home:5     syslog backup             idle     failed     2.1.284      Opus 4.8  -       4h19m
+
+3 sessions; latest installed claude 2.1.284 (1 older); remote control not connected: 2; with queued messages: 1
+```
+
+| column | from |
+|---|---|
+| `status` | Claude Code's own state in its session file: `idle`, `busy`, `waiting` (a dialog or permission prompt is open), `shell` |
+| `rc` | Remote Control: the coloured `/rc` indicator at the bottom of the pane (`connected`, `connecting`, `failed`, `off`). The session file's bridge id outlives a disconnect, so the pane is the only live signal |
+| `version` | the process's Claude Code version; `OLD` when behind the newest in `~/.local/share/claude/versions` (newest *installed*, not newest released) |
+| `model` | the newest real assistant message's model |
+| `queued` | messages waiting in Claude's input queue — they arrived while it was mid-turn or a dialog was open. Replayed from the transcript's `queue-operation` log (enqueue / dequeue / remove / popAll), counting only this process's entries: the queue lives in memory, so a resume starts it empty. Dim prompt *suggestions* never enter it |
+| `idle` | age of the last user or assistant turn (not the transcript's mtime, as above) |
+
+`--show-resume` adds the command that reopens the session:
+`cd <launch dir> && claude --resume <id>` (resume is project-scoped, hence
+the `cd`). Status reads transcripts in full, so on a server with hundreds
+of megabytes of them it takes several seconds.
+
 ## The ~/bin/claude-resume symlink
 
 `setup install`/`update` manage `~/bin/claude-resume` as a symlink to the
