@@ -43,6 +43,10 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y tmux
       - run: go vet ./...
       - run: go test -race ./...
+      # The release job only runs on the default branch; this checks its
+      # asset naming on every build (see packaging/release-assets.sh).
+      - name: Release asset names
+        run: sh packaging/release-assets-test.sh
 
   # One job per architecture: the static binary is built once, then packaged
   # for each of its suites, since ~deb<R> gives every suite its own version.
@@ -82,7 +86,6 @@ jobs:
           go-version-file: go.mod
 
       # One step per suite: the shared action versions one suite at a time.
-      # TODO: @main once mithro/apt-repo-action#27 merges.
       - name: Version (trixie)
         id: v-trixie
         if: contains(matrix.suites, 'trixie')
@@ -230,7 +233,6 @@ jobs:
     uses: mithro/apt-repo-action/.github/workflows/publish-apt.yml@main
     with:
       suites: "trixie forky sid raspbian-trixie raspbian-forky"
-      architectures: "amd64 i386 arm64 armhf riscv64"
       description: "Save and restore tmux sessions"
     secrets:
       gpg-private-key: ${{ secrets.APT_GPG_PRIVATE_KEY }}
@@ -240,7 +242,9 @@ jobs:
   # suite's .deb as <suite>_<file>.deb, the static binaries and SHA256SUMS.
   release:
     if: github.event_name != 'pull_request' && github.ref_name == github.event.repository.default_branch
-    needs: build-deb
+    # After the publish: a build whose apt repository didn't deploy isn't
+    # released either, and a re-run of the workflow does both.
+    needs: [build-deb, publish-apt]
     runs-on: ubuntu-latest
     permissions:
       contents: write   # create the tag and the GitHub Release
@@ -249,7 +253,6 @@ jobs:
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
-      # TODO: @main once mithro/apt-repo-action#27 merges.
       - name: Version
         id: v
         uses: mithro/apt-repo-action/deb-version@main
@@ -258,19 +261,12 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts/
+      # Named as GitHub stores them, so SHA256SUMS matches what's downloaded.
       - name: Collect the assets
         run: |
           set -euo pipefail
-          mkdir -p release
-          for dir in artifacts/debs-*; do
-            name="${dir#artifacts/debs-}"
-            suite="${name%-*}"   # debs-<suite>-<arch>; a suite may contain a dash
-            for deb in "$dir"/*.deb; do cp "$deb" "release/${suite}_$(basename "$deb")"; done
-          done
-          cp artifacts/bin-*/go-tmux-saver-linux-* release/
-          cd release
-          sha256sum -- * > SHA256SUMS
-          cat SHA256SUMS
+          sh packaging/release-assets.sh artifacts release artifacts/bin-*/go-tmux-saver-linux-*
+          cat release/SHA256SUMS
       - name: Create the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
