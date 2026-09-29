@@ -106,6 +106,30 @@ Panes not running Claude are skipped silently; a pane already at the
 placeholder resolves as Claude but has no live process, so it is skipped
 too (suspend is idempotent).
 
+### Parking only idle sessions
+
+On a long-lived server, sessions nobody has touched for days still hold a
+`claude` process (and its MCP children) each. `--idle-for` limits any
+target form to sessions whose **last user or assistant turn** in the
+transcript is at least that old:
+
+```sh
+claude-suspend --all --idle-for 48h --dry-run   # list candidates, touch nothing
+claude-suspend --all --idle-for 48h             # park them
+```
+
+The transcript's modification time is deliberately not used:
+`/remote-control` appends bookkeeping entries to every open session, so it
+says nothing about whether anyone used it. A session with no transcript or
+no turn yet is skipped, since resuming it would fail with "No conversation
+found". Every skipped pane is reported with its reason (`active 3h0m0s
+ago`, `no transcript or no turn yet`).
+
+`--dry-run` works with or without `--idle-for`. Check its list before a
+sweep: an unsent draft in a candidate's input box would be submitted along
+with `/exit` (#42), and a `claude --worktree` session stops at the
+keep/remove-worktree dialog (#43).
+
 ## The ~/bin/claude-resume symlink
 
 `setup install`/`update` manage `~/bin/claude-resume` as a symlink to the
