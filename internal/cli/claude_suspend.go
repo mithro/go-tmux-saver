@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -302,6 +303,45 @@ func suspendWindow(ctx context.Context, d SuspendDeps, tb *procs.Table, sess str
 	return done, failed
 }
 
+// winRef is one tmux window: session name + window index.
+type winRef struct {
+	Sess  string
+	Index int
+}
+
+// selectWindows turns the command's arguments into windows: one window (by
+// [session +] index or name — a name may match several) or, with all=true,
+// every window of every session group, in session-name then index order.
+func selectWindows(ctx context.Context, t tmuxctl.Transport, sessArg, winArg string, all bool) ([]winRef, error) {
+	var out []winRef
+	if all {
+		live, err := restore.QueryLive(ctx, t)
+		if err != nil {
+			return nil, err
+		}
+		for sess, wins := range live.Sessions {
+			for _, w := range wins {
+				out = append(out, winRef{sess, w.Index})
+			}
+		}
+		sort.Slice(out, func(i, j int) bool {
+			if out[i].Sess != out[j].Sess {
+				return out[i].Sess < out[j].Sess
+			}
+			return out[i].Index < out[j].Index
+		})
+		return out, nil
+	}
+	idxs, err := resolveWindow(ctx, t, sessArg, winArg)
+	if err != nil {
+		return nil, err
+	}
+	for _, idx := range idxs {
+		out = append(out, winRef{sessArg, idx})
+	}
+	return out, nil
+}
+
 // RunSuspend executes claude-suspend: one window (by [session +] index or
 // name) or, with all=true, every window of every session group.
 func RunSuspend(ctx context.Context, d SuspendDeps, sessArg, winArg string, all bool) (done, failed int, err error) {
@@ -309,25 +349,12 @@ func RunSuspend(ctx context.Context, d SuspendDeps, sessArg, winArg string, all 
 	if err != nil {
 		return 0, 0, err
 	}
-	if all {
-		live, err := restore.QueryLive(ctx, d.T)
-		if err != nil {
-			return 0, 0, err
-		}
-		for sess, wins := range live.Sessions {
-			for _, w := range wins {
-				dn, fl := suspendWindow(ctx, d, tb, sess, w.Index)
-				done, failed = done+dn, failed+fl
-			}
-		}
-		return done, failed, nil
-	}
-	idxs, err := resolveWindow(ctx, d.T, sessArg, winArg)
+	wins, err := selectWindows(ctx, d.T, sessArg, winArg, all)
 	if err != nil {
 		return 0, 0, err
 	}
-	for _, idx := range idxs {
-		dn, fl := suspendWindow(ctx, d, tb, sessArg, idx)
+	for _, w := range wins {
+		dn, fl := suspendWindow(ctx, d, tb, w.Sess, w.Index)
 		done, failed = done+dn, failed+fl
 	}
 	return done, failed, nil
