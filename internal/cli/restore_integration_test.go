@@ -129,6 +129,68 @@ func TestSaveRestoreRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSaveRestoreRoundTripDeadPanes covers issue #55 end to end on a REAL
+// tmux server. Before the fix, a single dead pane (remain-on-exit; empty
+// #{pane_pid}) made every save fail. Now: save succeeds, and restore brings
+// each dead pane back DEAD — same exit status / signal, its saved output
+// visible — while a live sibling pane in the same window stays a live shell
+// (remain-on-exit is set per pane, not on the window).
+func TestSaveRestoreRoundTripDeadPanes(t *testing.T) {
+	sock := tmuxctl.StartTestServer(t)
+	run := func(args ...string) {
+		if out, err := exec.Command("tmux", append([]string{"-L", sock}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("tmux %v: %v: %s", args, err, out)
+		}
+	}
+	paneState := func(target string) string {
+		out, _ := exec.Command("tmux", "-L", sock, "display-message", "-p", "-t", target, "dead=#{pane_dead} status=#{pane_dead_status} signal=#{pane_dead_signal}").Output()
+		return strings.TrimSpace(string(out))
+	}
+	paneText := func(target string) string {
+		out, _ := exec.Command("tmux", "-L", sock, "capture-pane", "-p", "-J", "-S", "-", "-t", target).Output()
+		return string(out)
+	}
+	// killPaneWith turns target into a dead pane that printed marker and then
+	// ended via tail (e.g. "exit 3").
+	killPaneWith := func(target, marker, tail string) {
+		run("set-option", "-p", "-t", target, "remain-on-exit", "on")
+		run("respawn-pane", "-k", "-t", target, "echo "+marker+"; "+tail)
+	}
+
+	run("new-session", "-d", "-s", "dz", "-n", "mixed", "-c", "/tmp")
+	run("split-window", "-d", "-t", "dz:0", "-c", "/tmp")
+	run("new-window", "-d", "-t", "dz:1", "-n", "sig", "-c", "/tmp")
+	killPaneWith("dz:0.0", "exit-marker-55", "exit 3")
+	killPaneWith("dz:1.0", "signal-marker-55", "kill -15 $$")
+
+	wantExited := "dead=1 status=3 signal="
+	wantSignalled := "dead=1 status= signal=15"
+	settled := func() (bool, string) {
+		st := "dz:0.0 " + paneState("dz:0.0") + "\ndz:1.0 " + paneState("dz:1.0") + "\ndz:0.1 " + paneState("dz:0.1")
+		return paneState("dz:0.0") == wantExited && paneState("dz:1.0") == wantSignalled && strings.HasPrefix(paneState("dz:0.1"), "dead=0") &&
+			strings.Contains(paneText("dz:0.0"), "exit-marker-55") && strings.Contains(paneText("dz:1.0"), "signal-marker-55"), st
+	}
+	waitFor(t, 5*time.Second, settled)
+
+	dataDir := t.TempDir()
+	cfgFile := writeTestConfig(t, sock)
+	t.Setenv("XDG_DATA_HOME", dataDir)
+	if code := Run([]string{"save", "--config", cfgFile, "--no-display"}, io.Discard, os.Stderr); code != 0 {
+		t.Fatal("save failed with dead panes present (issue #55)")
+	}
+	run("kill-session", "-t", "dz")
+	if code := Run([]string{"restore", "--on-start", "--config", cfgFile}, io.Discard, os.Stderr); code != 0 {
+		t.Fatal("restore failed")
+	}
+
+	// The same state as before the save: both panes dead with the original
+	// status/signal and their output on screen, the sibling still alive.
+	waitFor(t, 5*time.Second, settled)
+	if out, _ := exec.Command("tmux", "-L", sock, "show-options", "-w", "-t", "dz:0", "remain-on-exit").Output(); strings.TrimSpace(string(out)) != "" {
+		t.Errorf("remain-on-exit leaked onto the window: %q (must be per-pane only)", out)
+	}
+}
+
 // TestSaveRestoreRoundTripHostileNames covers the issue-#8 gap: the C1
 // quoting fix (tmuxctl.Quote on every data-derived argument) is exercised
 // against a REAL tmux server with names containing double quotes,
