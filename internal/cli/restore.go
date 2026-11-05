@@ -96,6 +96,12 @@ func renderPlan(plan restore.Plan) []string {
 			out = append(out, "would run: "+a.Args[0])
 		case "contents":
 			out = append(out, "would replay scrollback into "+a.Args[0])
+		case "dead":
+			what := "with its saved output"
+			if a.Args[1] == "" {
+				what = "(no saved output)"
+			}
+			out = append(out, fmt.Sprintf("would restore dead pane %s %s, then `%s`", a.Args[0], what, a.Args[2]))
 		case "note":
 			out = append(out, fmt.Sprintf("skip (%s): %s", a.Session, a.Note))
 		case "warn":
