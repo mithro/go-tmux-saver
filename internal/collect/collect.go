@@ -74,9 +74,9 @@ func splitTail(line string, nTail int) (head string, tail []string, ok bool) {
 
 // Collect builds a snapshot of the live server plus every pane's captured
 // scrollback. The returned warnings are non-fatal problems the caller
-// should surface (currently: panes whose capture-pane answered with a tmux
-// %error, e.g. because the pane vanished mid-save) — the snapshot is still
-// complete and worth keeping.
+// should surface (panes whose capture-pane answered with a tmux %error, e.g.
+// because the pane vanished mid-save, and malformed list-panes lines, whose
+// pane is left out — issue #55) — the snapshot is still worth keeping.
 func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string][]byte, []string, error) {
 	start := time.Now()
 	var warnings []string
@@ -206,6 +206,16 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 	}
 	var caps []capture
 	var resolveTotal time.Duration
+	// Issue #55: a pane line that can't be parsed costs exactly that pane —
+	// it is left out of the snapshot with a warning (which save records in
+	// the event detail) — never the whole save. One unparseable pane used to
+	// abort every autosave until someone noticed.
+	skip := func(field, l string) {
+		if field != "" {
+			field = " (" + field + ")"
+		}
+		warnings = append(warnings, fmt.Sprintf("malformed list-panes line%s, pane skipped: %q", field, l))
+	}
 	// Pass 2: no further appends happen to any se.Windows slice, so taking
 	// &se.Windows[pos] here is safe and stable for the rest of Collect.
 	for _, l := range paneLines {
@@ -220,11 +230,13 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 		// glyphs, command lines).
 		head, tail, ok := splitTail(l, 4)
 		if !ok {
-			return nil, nil, warnings, fmt.Errorf("malformed list-panes line: %q", l)
+			skip("", l)
+			continue
 		}
 		f := strings.SplitN(head, "\t", 8)
 		if len(f) != 8 {
-			return nil, nil, warnings, fmt.Errorf("malformed list-panes line: %q", l)
+			skip("", l)
+			continue
 		}
 		session, winIdxStr, paneIdxStr, paneID, paneActive, panePIDStr, cwd, title := f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]
 		dead, deadStatusStr, deadSignalStr, histStr := tail[0] == "1", tail[1], tail[2], tail[3]
@@ -240,11 +252,13 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 		w := &se.Windows[pos]
 		idx, err := strconv.Atoi(paneIdxStr)
 		if err != nil {
-			return nil, nil, warnings, fmt.Errorf("malformed list-panes line (pane_index): %q", l)
+			skip("pane_index", l)
+			continue
 		}
 		hist, err := strconv.Atoi(histStr)
 		if err != nil {
-			return nil, nil, warnings, fmt.Errorf("malformed list-panes line (history_size): %q", l)
+			skip("history_size", l)
+			continue
 		}
 		var restore snapshot.Restore
 		if dead {
@@ -255,7 +269,8 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 		} else {
 			pid, err := strconv.Atoi(panePIDStr)
 			if err != nil {
-				return nil, nil, warnings, fmt.Errorf("malformed list-panes line (pane_pid): %q", l)
+				skip("pane_pid", l)
+				continue
 			}
 			// The clock reads are behind trace.Enabled so the untraced path
 			// really is one bool test per pane, not two time.Now() syscalls.

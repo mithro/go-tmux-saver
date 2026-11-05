@@ -108,18 +108,47 @@ func TestCollectPaneTitleWithEmbeddedTab(t *testing.T) {
 	}
 }
 
-// (ii) a pane line with too few fields must fail loudly, not silently.
-func TestCollectMalformedPaneLineErrors(t *testing.T) {
+// (ii) issue #55: a malformed pane line must be LOUD but must cost only that
+// pane, never the whole snapshot — one unparseable pane used to abort every
+// save (a partial snapshot is far better than none). Each bad line becomes a
+// warning (which save puts in the event detail); the healthy panes are kept.
+// (Were EVERY line bad — e.g. a format mismatch — the snapshot would have no
+// panes and the degenerate guard would refuse it, so that stays loud too.)
+func TestCollectMalformedPaneLineWarnsAndSkips(t *testing.T) {
 	f := &tmuxctl.Fake{Replies: map[string][]string{
 		ServerCmd:  {"100\tnext-3.8\tour-control-client"},
 		ClientsCmd: {},
 		SessCmd:    {"default\t\t0\t1"},
 		WinCmd:     {"default\t0\th\t1\t*\tlayout\ton"},
-		PaneCmd:    {"default\t0\t0\t%0\t1\t100\t/home/tim"}, // only 7 of 12 fields
+		PaneCmd: {
+			"default\t0\t0\t%0\t1\t100\t/home/tim\tok\t0\t\t\t3",
+			"default\t0\t1\t%1\t0\t100\t/home/tim",                // only 7 of 12 fields
+			"default\t0\tX\t%2\t0\t100\t/home/tim\tt\t0\t\t\t3",   // bad pane_index
+			"default\t0\t3\t%3\t0\tnope\t/home/tim\tt\t0\t\t\t3",  // bad pane_pid on a LIVE pane
+			"default\t0\t4\t%4\t0\t100\t/home/tim\tt\t0\t\t\tbad", // bad history_size
+		},
+		"capture-pane -epJ -S -3 -t %0": {"fine"},
 	}}
 	c := newCollector(f)
-	if _, _, _, err := c.Collect(context.Background()); err == nil || !strings.Contains(err.Error(), "malformed") {
-		t.Fatalf("err = %v, want a malformed-line error", err)
+	snap, contents, warnings, err := c.Collect(context.Background())
+	if err != nil {
+		t.Fatalf("a malformed pane line must not abort the save: %v", err)
+	}
+	if len(warnings) != 4 {
+		t.Fatalf("warnings = %q, want one per malformed line (4)", warnings)
+	}
+	for i, want := range []string{"%1", "pane_index", "pane_pid", "history_size"} {
+		if !strings.Contains(warnings[i], "malformed list-panes line") || !strings.Contains(warnings[i], want) {
+			t.Errorf("warning %d = %q, want a malformed-line warning mentioning %q", i, warnings[i], want)
+		}
+	}
+	if n, _ := snap.CountPanes(); n != 1 || string(contents["default_0_0"]) != "fine\n" {
+		t.Fatalf("panes = %d, contents = %q; want only the healthy pane kept and captured", n, contents)
+	}
+	for _, call := range f.Calls {
+		if strings.HasPrefix(call, "capture-pane") && !strings.HasSuffix(call, "%0") {
+			t.Errorf("skipped pane was captured anyway: %q", call)
+		}
 	}
 }
 
