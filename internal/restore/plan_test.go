@@ -421,3 +421,56 @@ func TestBuildPlanRelocationsOrderedLast(t *testing.T) {
 		t.Fatalf("relocation at action %d must come after the last fixed-index creation at %d:\n%+v", relocAt, lastFixedAt, plan.Actions)
 	}
 }
+
+// TestPlanDeadPanes covers issue #55: a dead pane is restored DEAD, showing
+// its saved output — one "dead" action per pane carrying the target, the
+// content key (only when contents are enabled and were saved) and the shell
+// tail that reproduces the exit status or signal. A dead pane must never get
+// the ordinary "contents" cat-replay typed into it, nor any send-keys.
+func TestPlanDeadPanes(t *testing.T) {
+	three, nine := 3, 9
+	snap := &snapshot.Snapshot{Sessions: []snapshot.Session{{Name: "default", Windows: []snapshot.Window{
+		{Index: 0, Name: "help", Layout: "L0", Panes: []snapshot.Pane{
+			{Index: 0, Cwd: "", Active: true, ContentFile: "default_0_0.txt.gz", Restore: snapshot.Restore{Kind: snapshot.KindDead, ExitStatus: &three}},
+			{Index: 1, Cwd: "/tmp", ContentFile: "default_0_1.txt.gz", Restore: snapshot.Restore{Kind: snapshot.KindDead, ExitSignal: &nine}},
+			{Index: 2, Cwd: "/tmp", Restore: snapshot.Restore{Kind: snapshot.KindDead}}, // no content saved, status unknown
+		}},
+	}}}}
+	live := LiveState{Sessions: map[string][]LiveWindow{}}
+
+	p := BuildPlan(live, snap, Options{Contents: true})
+	var dead [][]string
+	for _, a := range p.Actions {
+		switch a.Kind {
+		case "dead":
+			dead = append(dead, a.Args)
+		case "contents":
+			t.Errorf("dead pane got a cat-replay contents action: %+v", a)
+		case "tmux":
+			if strings.HasPrefix(a.Args[0], "send-keys") {
+				t.Errorf("dead pane got keys typed into it: %q", a.Args[0])
+			}
+		}
+	}
+	want := [][]string{
+		{"=default:0.0", "default_0_0", "exit 3"},
+		{"=default:0.1", "default_0_1", "kill -9 $$"},
+		{"=default:0.2", "", "exit 0"},
+	}
+	if len(dead) != len(want) {
+		t.Fatalf("dead actions = %q, want %q", dead, want)
+	}
+	for i := range want {
+		if strings.Join(dead[i], "|") != strings.Join(want[i], "|") {
+			t.Errorf("dead action %d = %q, want %q", i, dead[i], want[i])
+		}
+	}
+
+	// Contents disabled: the pane still comes back dead, just without output.
+	p = BuildPlan(live, snap, Options{Contents: false})
+	for _, a := range p.Actions {
+		if a.Kind == "dead" && a.Args[1] != "" {
+			t.Errorf("contents disabled but dead action carries a content key: %q", a.Args)
+		}
+	}
+}
