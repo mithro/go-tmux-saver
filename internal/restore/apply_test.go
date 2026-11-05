@@ -324,3 +324,67 @@ func TestApplyLiveServerHostileWindowName(t *testing.T) {
 		t.Fatalf("live windows =\n%s\nwant exactly default:0 h + default:1 %q (nothing else created or killed)", got, hostile)
 	}
 }
+
+// TestApplyDeadPane covers issue #55: a "dead" action marks THAT pane
+// remain-on-exit (pane option, not window/global) and respawns it with a
+// command that cats the saved output and then exits the way the original
+// died. The content goes through a replay file like the ordinary replay —
+// never typed as keys. Without saved content the pane still ends dead.
+func TestApplyDeadPane(t *testing.T) {
+	p := Plan{Actions: []Action{
+		{Kind: "dead", Args: []string{"=default:0.0", "default_0_0", "exit 3"}, Session: "default"},
+		{Kind: "dead", Args: []string{"=default:0.1", "", "kill -9 $$"}, Session: "default"},
+		{Kind: "dead", Args: []string{"=default:0.2", "default_0_2", "exit 0"}, Session: "default"}, // key given but nothing saved
+	}}
+	f := &tmuxctl.Fake{Default: []string{}}
+	contentsFn := func(paneKey string) ([]byte, bool) {
+		if paneKey == "default_0_0" {
+			return []byte("help text\n"), true
+		}
+		return nil, false
+	}
+	replayDir := filepath.Join(t.TempDir(), "replay")
+
+	report, err := Apply(context.Background(), f, p, contentsFn, replayDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Notes) != 0 {
+		t.Fatalf("notes = %q, want none", report.Notes)
+	}
+	replay := filepath.Join(replayDir, "default_0_0.txt")
+	want := []string{
+		`set-option -p -t "=default:0.0" remain-on-exit on`,
+		`respawn-pane -k -t "=default:0.0" ` + tmuxQuote("cat "+shellQuote([]string{replay})+"; exit 3"),
+		`set-option -p -t "=default:0.1" remain-on-exit on`,
+		`respawn-pane -k -t "=default:0.1" "kill -9 \$\$"`,
+		`set-option -p -t "=default:0.2" remain-on-exit on`,
+		`respawn-pane -k -t "=default:0.2" "exit 0"`,
+	}
+	if strings.Join(f.Calls, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("calls =\n%s\nwant\n%s", strings.Join(f.Calls, "\n"), strings.Join(want, "\n"))
+	}
+	if got, err := os.ReadFile(replay); err != nil || string(got) != "help text\n" {
+		t.Fatalf("replay file = %q, %v", got, err)
+	}
+}
+
+// TestApplyDeadPaneSkippedWhenWindowAborted: like "contents", a "dead"
+// action belongs to its window's block — if the window's creation failed
+// there is no pane to kill, so it must be skipped, not run against a stale
+// or wrong target.
+func TestApplyDeadPaneSkippedWhenWindowAborted(t *testing.T) {
+	p := Plan{Actions: []Action{
+		{Kind: "tmux", Args: []string{`new-window -d -t "=default:1" -n "x"`}, Session: "default"},
+		{Kind: "dead", Args: []string{"=default:1.0", "", "exit 0"}, Session: "default"},
+	}}
+	f := &failOnce{Fake: &tmuxctl.Fake{Default: []string{}}, failCmd: `new-window -d -t "=default:1" -n "x"`}
+	if _, err := Apply(context.Background(), f, p, func(string) ([]byte, bool) { return nil, false }, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range f.Calls {
+		if strings.HasPrefix(c, "respawn-pane") || strings.HasPrefix(c, "set-option") {
+			t.Fatalf("dead action ran after its window failed to create: %q", c)
+		}
+	}
+}
