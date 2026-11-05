@@ -48,10 +48,22 @@ type Pane struct {
 	Restore       Restore `json:"restore"`
 }
 
+// KindDead is the Restore.Kind of a pane whose process had already exited
+// (kept by remain-on-exit) when the snapshot was taken. Issue #55: such a
+// pane is restored as a DEAD pane showing its saved output and exit status —
+// never respawned, never given a shell.
+const KindDead = "dead"
+
 type Restore struct {
 	Kind          string   `json:"kind"`
 	Argv          []string `json:"argv,omitempty"`
 	ClaudeSession string   `json:"claude_session,omitempty"`
+	// ExitStatus and ExitSignal are set only for KindDead panes: tmux's
+	// #{pane_dead_status} (normal exit) or #{pane_dead_signal} (killed by a
+	// signal; tmux ≥3.3). Pointers so a status of 0 survives omitempty and
+	// "unknown" stays distinguishable from 0.
+	ExitStatus *int `json:"exit_status,omitempty"`
+	ExitSignal *int `json:"exit_signal,omitempty"`
 }
 
 // ClientState is INFORMATIONAL ONLY (RULING R44): the session of the
