@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mithro/go-tmux-saver/internal/procs"
+	"github.com/mithro/go-tmux-saver/internal/snapshot"
 	"github.com/mithro/go-tmux-saver/internal/tmuxctl"
 )
 
@@ -15,8 +16,8 @@ func fakeServer() *tmuxctl.Fake {
 	return &tmuxctl.Fake{Replies: map[string][]string{
 		SessCmd: {"default\tdefault\t1\t1", "default-1\tdefault\t1\t1", "net\t\t0\t0"},
 		WinCmd:  {"default\t0\th\t1\t*\tbfbf,80x24,0,0,0\ton", "default-1\t0\th\t1\t*\tx\ton", "net\t2\tswcfg\t1\t*\tdead,80x24,0,0{40x24,0,0,1,39x24,41,0,2}\toff"},
-		PaneCmd: {"default\t0\t0\t%0\t1\t100\t/home/tim\ttim@ten64: ~\t3", "default-1\t0\t0\t%0\t1\t100\t/home/tim\tx\t3",
-			"net\t2\t0\t%1\t1\t300\t/home/tim/net\t✳ switch config\t2", "net\t2\t1\t%2\t0\t200\t/home/tim\tten64\t0"},
+		PaneCmd: {"default\t0\t0\t%0\t1\t100\t/home/tim\ttim@ten64: ~\t0\t\t\t3", "default-1\t0\t0\t%0\t1\t100\t/home/tim\tx\t0\t\t\t3",
+			"net\t2\t0\t%1\t1\t300\t/home/tim/net\t✳ switch config\t0\t\t\t2", "net\t2\t1\t%2\t0\t200\t/home/tim\tten64\t0\t\t\t0"},
 		ServerCmd: {"1787201600\tnext-3.8\t/dev/pts/99"},
 		ClientsCmd: {
 			"1787201000\t/dev/pts/1\tdefault",
@@ -87,7 +88,7 @@ func TestCollectPaneTitleWithEmbeddedTab(t *testing.T) {
 		ClientsCmd:                      {},
 		SessCmd:                         {"default\t\t0\t1"},
 		WinCmd:                          {"default\t0\th\t1\t*\tlayout\ton"},
-		PaneCmd:                         {"default\t0\t0\t%0\t1\t100\t/home/tim\thas\ttab in it\t5"},
+		PaneCmd:                         {"default\t0\t0\t%0\t1\t100\t/home/tim\thas\ttab in it\t0\t\t\t5"},
 		"capture-pane -epJ -S -5 -t %0": {"z"},
 	}}
 	c := newCollector(f)
@@ -107,18 +108,91 @@ func TestCollectPaneTitleWithEmbeddedTab(t *testing.T) {
 	}
 }
 
-// (ii) a pane line with too few fields must fail loudly, not silently.
-func TestCollectMalformedPaneLineErrors(t *testing.T) {
+// (ii) issue #55: a malformed pane line must be LOUD but must cost only that
+// pane, never the whole snapshot — one unparseable pane used to abort every
+// save (a partial snapshot is far better than none). Each bad line becomes a
+// warning (which save puts in the event detail); the healthy panes are kept.
+// (Were EVERY line bad — e.g. a format mismatch — the snapshot would have no
+// panes and the degenerate guard would refuse it, so that stays loud too.)
+func TestCollectMalformedPaneLineWarnsAndSkips(t *testing.T) {
 	f := &tmuxctl.Fake{Replies: map[string][]string{
 		ServerCmd:  {"100\tnext-3.8\tour-control-client"},
 		ClientsCmd: {},
 		SessCmd:    {"default\t\t0\t1"},
 		WinCmd:     {"default\t0\th\t1\t*\tlayout\ton"},
-		PaneCmd:    {"default\t0\t0\t%0\t1\t100\t/home/tim"}, // only 7 of 9 fields
+		PaneCmd: {
+			"default\t0\t0\t%0\t1\t100\t/home/tim\tok\t0\t\t\t3",
+			"default\t0\t1\t%1\t0\t100\t/home/tim",                // only 7 of 12 fields
+			"default\t0\tX\t%2\t0\t100\t/home/tim\tt\t0\t\t\t3",   // bad pane_index
+			"default\t0\t3\t%3\t0\tnope\t/home/tim\tt\t0\t\t\t3",  // bad pane_pid on a LIVE pane
+			"default\t0\t4\t%4\t0\t100\t/home/tim\tt\t0\t\t\tbad", // bad history_size
+		},
+		"capture-pane -epJ -S -3 -t %0": {"fine"},
 	}}
 	c := newCollector(f)
-	if _, _, _, err := c.Collect(context.Background()); err == nil || !strings.Contains(err.Error(), "malformed") {
-		t.Fatalf("err = %v, want a malformed-line error", err)
+	snap, contents, warnings, err := c.Collect(context.Background())
+	if err != nil {
+		t.Fatalf("a malformed pane line must not abort the save: %v", err)
+	}
+	if len(warnings) != 4 {
+		t.Fatalf("warnings = %q, want one per malformed line (4)", warnings)
+	}
+	for i, want := range []string{"%1", "pane_index", "pane_pid", "history_size"} {
+		if !strings.Contains(warnings[i], "malformed list-panes line") || !strings.Contains(warnings[i], want) {
+			t.Errorf("warning %d = %q, want a malformed-line warning mentioning %q", i, warnings[i], want)
+		}
+	}
+	if n, _ := snap.CountPanes(); n != 1 || string(contents["default_0_0"]) != "fine\n" {
+		t.Fatalf("panes = %d, contents = %q; want only the healthy pane kept and captured", n, contents)
+	}
+	for _, call := range f.Calls {
+		if strings.HasPrefix(call, "capture-pane") && !strings.HasSuffix(call, "%0") {
+			t.Errorf("skipped pane was captured anyway: %q", call)
+		}
+	}
+}
+
+// TestCollectDeadPane covers issue #55. A pane whose process has exited but
+// which remain-on-exit keeps around reports an EMPTY #{pane_pid} (and an
+// empty #{pane_current_path}); the save used to abort on the empty pid with
+// "malformed list-panes line (pane_pid)", silently stopping every autosave on
+// ten64 for 12 hours. The first fixture line is that ten64 pane's exact
+// prefix. A dead pane must be recorded as KindDead with its exit status (or
+// signal) and its output captured like any other pane — no /proc lookup.
+func TestCollectDeadPane(t *testing.T) {
+	f := &tmuxctl.Fake{Replies: map[string][]string{
+		ServerCmd:  {"100\tnext-3.8\tour-control-client"},
+		ClientsCmd: {},
+		SessCmd:    {"default\t\t0\t1"},
+		WinCmd:     {"default\t0\th\t1\t*\tlayout\ton", "default\t1\tk\t0\t\tlayout\ton"},
+		PaneCmd: {
+			"default\t0\t0\t%0\t1\t\t\tten64.welland.mithis.com\t1\t0\t\t1",
+			"default\t1\t0\t%9\t1\t\t\tkilled\t1\t\t9\t0",
+		},
+		"capture-pane -epJ -S -1 -t %0": {"help text", "Pane is dead (status 0, Wed Nov  4 22:15:00 2026)"},
+		"capture-pane -epJ -S -0 -t %9": {"bye"},
+	}}
+	c := newCollector(f)
+	snap, contents, warnings, err := c.Collect(context.Background())
+	if err != nil {
+		t.Fatalf("a dead pane must not abort the save: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %q, want none (a dead pane is normal, not a problem)", warnings)
+	}
+	exited := snap.Sessions[0].Windows[0].Panes[0]
+	if exited.Restore.Kind != snapshot.KindDead || exited.Restore.ExitStatus == nil || *exited.Restore.ExitStatus != 0 || exited.Restore.ExitSignal != nil {
+		t.Fatalf("exited pane restore = %+v, want dead with exit status 0 and no signal", exited.Restore)
+	}
+	if exited.ID != "%0" || exited.Title != "ten64.welland.mithis.com" || exited.HistoryLines != 1 || !exited.Active {
+		t.Fatalf("exited pane = %+v", exited)
+	}
+	killed := snap.Sessions[0].Windows[1].Panes[0]
+	if killed.Restore.Kind != snapshot.KindDead || killed.Restore.ExitStatus != nil || killed.Restore.ExitSignal == nil || *killed.Restore.ExitSignal != 9 {
+		t.Fatalf("killed pane restore = %+v, want dead with signal 9 and no status", killed.Restore)
+	}
+	if string(contents["default_0_0"]) != "help text\nPane is dead (status 0, Wed Nov  4 22:15:00 2026)\n" || string(contents["default_1_0"]) != "bye\n" {
+		t.Fatalf("contents = %q, want both dead panes' output captured", contents)
 	}
 }
 
@@ -142,7 +216,7 @@ func TestCollectCapturePaneTransportErrorPropagates(t *testing.T) {
 			ClientsCmd: {},
 			SessCmd:    {"default\t\t0\t1"},
 			WinCmd:     {"default\t0\th\t1\t*\tlayout\ton"},
-			PaneCmd:    {"default\t0\t0\t%0\t1\t100\t/home/tim\ttitle\t3"},
+			PaneCmd:    {"default\t0\t0\t%0\t1\t100\t/home/tim\ttitle\t0\t\t\t3"},
 		}},
 		failCmd: "capture-pane -epJ -S -3 -t %0",
 		err:     errors.New("control connection closed"),
@@ -184,7 +258,7 @@ func TestCollectCapturePaneCmdErrorWarnsAndContinues(t *testing.T) {
 			ClientsCmd:                      {},
 			SessCmd:                         {"default\t\t0\t1"},
 			WinCmd:                          {"default\t0\th\t1\t*\tlayout\ton"},
-			PaneCmd:                         {"default\t0\t0\t%0\t1\t100\t/home/tim\tok\t3", "default\t0\t1\t%57\t0\t100\t/home/tim\tgone\t3"},
+			PaneCmd:                         {"default\t0\t0\t%0\t1\t100\t/home/tim\tok\t0\t\t\t3", "default\t0\t1\t%57\t0\t100\t/home/tim\tgone\t0\t\t\t3"},
 			"capture-pane -epJ -S -3 -t %0": {"still", "here"},
 		}},
 		failCmd: gone,
@@ -289,13 +363,13 @@ func TestCollectKeepsOneGroupedSessionMember(t *testing.T) {
 			"orphan-9\t0\tw\t1\t*\tL4\toff",
 		},
 		PaneCmd: {
-			"433mhz\t0\t0\t%1\t1\t100\t/home/tim\tt\t0",
-			"default\t0\t0\t%2\t1\t100\t/home/tim\tt\t0",
-			"default\t1\t0\t%3\t1\t100\t/home/tim\tt\t0",
-			"default-36\t0\t0\t%2\t1\t100\t/home/tim\tt\t0",
-			"default-36\t1\t0\t%3\t1\t100\t/home/tim\tt\t0",
-			"orphan-2\t0\t0\t%4\t1\t100\t/home/tim\tt\t0",
-			"orphan-9\t0\t0\t%4\t1\t100\t/home/tim\tt\t0",
+			"433mhz\t0\t0\t%1\t1\t100\t/home/tim\tt\t0\t\t\t0",
+			"default\t0\t0\t%2\t1\t100\t/home/tim\tt\t0\t\t\t0",
+			"default\t1\t0\t%3\t1\t100\t/home/tim\tt\t0\t\t\t0",
+			"default-36\t0\t0\t%2\t1\t100\t/home/tim\tt\t0\t\t\t0",
+			"default-36\t1\t0\t%3\t1\t100\t/home/tim\tt\t0\t\t\t0",
+			"orphan-2\t0\t0\t%4\t1\t100\t/home/tim\tt\t0\t\t\t0",
+			"orphan-9\t0\t0\t%4\t1\t100\t/home/tim\tt\t0\t\t\t0",
 		},
 		ServerCmd:                       {"1787201600\tnext-3.8\t/dev/pts/99"},
 		ClientsCmd:                      {},

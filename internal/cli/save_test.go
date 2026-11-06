@@ -22,7 +22,7 @@ func saveFake() *tmuxctl.Fake {
 	return &tmuxctl.Fake{Replies: map[string][]string{
 		collect.SessCmd:                 {"default\t\t0\t1"},
 		collect.WinCmd:                  {"default\t0\tw\t1\t*\tL\ton"},
-		collect.PaneCmd:                 {"default\t0\t0\t%0\t1\t100\t/home/tim\tt\t1", "default\t0\t1\t%1\t0\t300\t/home/tim\tt\t1"},
+		collect.PaneCmd:                 {"default\t0\t0\t%0\t1\t100\t/home/tim\tt\t0\t\t\t1", "default\t0\t1\t%1\t0\t300\t/home/tim\tt\t0\t\t\t1"},
 		collect.ServerCmd:               {"1\tnext-3.8\tdefault"},
 		"capture-pane -epJ -S -1 -t %0": {"a"}, "capture-pane -epJ -S -1 -t %1": {"b"},
 	}, Default: []string{}}

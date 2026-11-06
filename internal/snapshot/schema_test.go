@@ -27,6 +27,39 @@ func TestSchemaRoundTrip(t *testing.T) {
 	}
 }
 
+// TestSchemaDeadPaneRoundTrip covers issue #55: a dead pane's exit status
+// must survive the round trip, INCLUDING a status of 0 (which is why it is a
+// pointer — a plain int with omitempty would drop it), and an absent
+// status/signal must stay absent rather than becoming 0.
+func TestSchemaDeadPaneRoundTrip(t *testing.T) {
+	zero, nine := 0, 9
+	in := []Restore{
+		{Kind: KindDead, ExitStatus: &zero},
+		{Kind: KindDead, ExitSignal: &nine},
+		{Kind: KindDead},
+	}
+	for _, r := range in {
+		b, err := json.Marshal(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var back Restore
+		if err := json.Unmarshal(b, &back); err != nil {
+			t.Fatal(err)
+		}
+		if back.Kind != KindDead || !intPtrEqual(back.ExitStatus, r.ExitStatus) || !intPtrEqual(back.ExitSignal, r.ExitSignal) {
+			t.Fatalf("round trip %s -> %+v, want %+v", b, back, r)
+		}
+	}
+}
+
+func intPtrEqual(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
 func TestPaneKey(t *testing.T) {
 	if got := PaneKey("net", 2, 0); got != "net_2_0" {
 		t.Fatal(got)

@@ -41,7 +41,8 @@ type Report struct {
 // quoted key argument, so cat runs asynchronously in the pane exactly as if
 // a user had typed it, with a leading space so history-ignore-space shells
 // don't record it. The files are left in place; the caller (the CLI) owns
-// cleaning up old replay directories.
+// cleaning up old replay directories. "dead" actions (issue #55) use the same
+// replay files but run the cat as the pane's own command — see applyDead.
 //
 // ctx is checked at the top of every loop iteration (FINDING 3): once it's
 // done, Apply stops immediately and returns ctx.Err(), along with whatever
@@ -158,10 +159,57 @@ func Apply(ctx context.Context, t tmuxctl.Transport, p Plan, contents func(paneK
 			if _, err := t.Run(ctx, cmd); err != nil {
 				report.Notes = append(report.Notes, fmt.Sprintf("%s: %v", cmd, err))
 			}
+
+		case "dead":
+			if windowAborted {
+				continue
+			}
+			report.Notes = append(report.Notes, applyDead(ctx, t, resolve(a.Args[0]), a.Args[1], a.Args[2], contents, replayDir)...)
 		}
 	}
 
 	return report, nil
+}
+
+// applyDead turns the freshly created pane at target into a DEAD pane that
+// shows the saved output for paneKey and reports the original exit (issue
+// #55), probe-verified on tmux 3.8:
+//
+//  1. remain-on-exit is set on THIS PANE only (-p), so its siblings and the
+//     rest of the window keep the user's own setting;
+//  2. respawn-pane -k replaces the pane's shell with `cat <replay file>;
+//     <tail>` — the saved bytes are displayed from a file exactly like the
+//     ordinary replay (RULING R26: never typed as keys), then tail ("exit 3",
+//     "kill -9 $$") ends the pane so tmux shows the same "Pane is dead
+//     (status 3 …)" line as before. respawn-pane still works on it later.
+//
+// Without saved content (contents disabled, or nothing captured) the pane
+// still ends dead. Failures are returned as report notes.
+func applyDead(ctx context.Context, t tmuxctl.Transport, target, paneKey, tail string, contents func(string) ([]byte, bool), replayDir string) []string {
+	var notes []string
+	shellCmd := tail
+	if paneKey != "" {
+		if data, ok := contents(paneKey); ok {
+			path, err := writeReplayFile(replayDir, paneKey, data)
+			if err != nil {
+				notes = append(notes, fmt.Sprintf("contents %s: %v", target, err))
+			} else {
+				shellCmd = "cat " + shellQuote([]string{path}) + "; " + tail
+			}
+		}
+	}
+	for _, cmd := range []string{
+		fmt.Sprintf("set-option -p -t %s remain-on-exit on", tmuxQuote(target)),
+		fmt.Sprintf("respawn-pane -k -t %s %s", tmuxQuote(target), tmuxQuote(shellCmd)),
+	} {
+		if _, err := t.Run(ctx, cmd); err != nil {
+			// Without remain-on-exit the respawned pane would simply close
+			// when tail runs, taking the saved output with it — stop here
+			// and leave the ordinary shell pane in place instead.
+			return append(notes, fmt.Sprintf("%s: %v", cmd, err))
+		}
+	}
+	return notes
 }
 
 // firstLine returns the first non-blank line of lines, verified to parse as

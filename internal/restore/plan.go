@@ -36,6 +36,10 @@ type Options struct {
 //   - "tmux": Args[0] is one full tmux command line.
 //   - "contents": Args = [paneTarget, paneKey]; the applier looks up the
 //     pane's saved content by paneKey and displays it in paneTarget.
+//   - "dead": Args = [paneTarget, paneKey, tail]; the applier turns the pane
+//     into a DEAD pane (issue #55) that shows the saved content for paneKey
+//     (if paneKey is non-empty and content exists) and then runs tail (e.g.
+//     "exit 3"), so tmux reports the original exit status/signal.
 //   - "note": Note is a log line with no side effect (e.g. "skipped").
 //
 // Session names the saved session this action belongs to. Every action for
@@ -75,6 +79,25 @@ func (p *Plan) warn(session, msg string) {
 
 func (p *Plan) contents(session, paneTarget, paneKey string) {
 	p.Actions = append(p.Actions, Action{Kind: "contents", Args: []string{paneTarget, paneKey}, Session: session})
+}
+
+func (p *Plan) dead(session, paneTarget, paneKey, tail string) {
+	p.Actions = append(p.Actions, Action{Kind: "dead", Args: []string{paneTarget, paneKey, tail}, Session: session})
+}
+
+// deadTail is the shell command that ends a restored dead pane the same way
+// the original died, so tmux's "Pane is dead (status N / signal N)" line
+// matches: `exit N` for a normal exit, `kill -N $$` (the pane's own shell)
+// for a signal. An unknown cause (neither recorded) reads as status 0.
+func deadTail(r snapshot.Restore) string {
+	switch {
+	case r.ExitStatus != nil:
+		return fmt.Sprintf("exit %d", *r.ExitStatus)
+	case r.ExitSignal != nil:
+		return fmt.Sprintf("kill -%d $$", *r.ExitSignal)
+	default:
+		return "exit 0"
+	}
 }
 
 // findWindowByName returns the index of the live window named name, if any.
@@ -293,6 +316,17 @@ func BuildPlan(live LiveState, snap *snapshot.Snapshot, o Options) Plan {
 			}
 			for _, pn := range win.Panes {
 				paneTarget := fmt.Sprintf("%s.%d", target, pn.Index)
+				if pn.Restore.Kind == snapshot.KindDead {
+					// Issue #55: no cat-replay typed into a shell and no
+					// send-keys — the pane's own command is replaced by one
+					// that prints the saved output and dies the same way.
+					key := ""
+					if o.Contents && pn.ContentFile != "" {
+						key = snapshot.PaneKey(sess.Name, win.Index, pn.Index)
+					}
+					plan.dead(sess.Name, paneTarget, key, deadTail(pn.Restore))
+					continue
+				}
 				if o.Contents && pn.ContentFile != "" {
 					plan.contents(sess.Name, paneTarget, snapshot.PaneKey(sess.Name, win.Index, pn.Index))
 				}

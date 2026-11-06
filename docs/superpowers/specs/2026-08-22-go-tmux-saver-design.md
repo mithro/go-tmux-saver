@@ -123,13 +123,23 @@ holding `layout.json` (`"schema": 1`, small — structure only) and `panes/`
       windows: [ { index, name, layout, active, flags, automatic_rename,
           panes: [ { index, id, cwd, title, active, history_lines,
                      content_sha256, content_file,
-                     restore: { kind: "shell"|"argv"|"claude", argv: [...],
-                                claude_session: "<uuid>" } } ] } ] } ],
+                     restore: { kind: "shell"|"argv"|"claude"|"dead", argv: [...],
+                                claude_session: "<uuid>",
+                                exit_status, exit_signal } } ] } ] } ],   # exit_* only for "dead" (issue #55)
   client: { session },                # most recently active NON-control client's session at save time (informational; restore never acts on it)
   stats: { panes, windows, sessions, duration_ms } }
 ```
 
 Restore commands are argv arrays (no shell quoting).
+
+*Amendment 2026-11-05 (issue #55):* a pane whose process has exited but which
+`remain-on-exit` keeps (empty `#{pane_pid}`, `#{pane_dead}`=1) is recorded as
+`kind: "dead"` with `exit_status` or `exit_signal`, and restored dead: that
+pane alone gets `remain-on-exit on`, then `respawn-pane -k` runs `cat <replay
+file>; exit N` (or `kill -N $$`), so it shows its saved output and the same
+"Pane is dead" status. It is never relaunched. Also, a malformed `list-panes`
+line now costs only that pane (a warning in the save event), never the whole
+save. Schema stays 1: an older binary reads `"dead"` as a plain shell.
 
 **Per-pane files and hardlinks.** Each pane's captured scrollback is written
 to `panes/<session>_<window>_<pane>.txt<codec-ext>` (structural name, not the

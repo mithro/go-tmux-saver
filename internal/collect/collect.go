@@ -19,7 +19,10 @@ import (
 const (
 	SessCmd = "list-sessions -F \"#{session_name}\t#{session_group}\t#{session_grouped}\t#{session_attached}\""
 	WinCmd  = "list-windows -a -F \"#{session_name}\t#{window_index}\t#{window_name}\t#{window_active}\t#{window_flags}\t#{window_layout}\t#{automatic-rename}\""
-	PaneCmd = "list-panes -a -F \"#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_active}\t#{pane_pid}\t#{pane_current_path}\t#{pane_title}\t#{history_size}\""
+	// PaneCmd's three pane_dead* fields identify panes whose process has
+	// exited but which remain-on-exit keeps (issue #55): pane_pid is then
+	// EMPTY. pane_dead_signal is tmux ≥3.3; older versions expand it empty.
+	PaneCmd = "list-panes -a -F \"#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_active}\t#{pane_pid}\t#{pane_current_path}\t#{pane_title}\t#{pane_dead}\t#{pane_dead_status}\t#{pane_dead_signal}\t#{history_size}\""
 	// ServerCmd's third field is the name of OUR OWN client — the control
 	// connection this process opened — which is what identifies (and lets
 	// us exclude) ourselves in ClientsCmd's list. It is NOT the user's
@@ -71,9 +74,9 @@ func splitTail(line string, nTail int) (head string, tail []string, ok bool) {
 
 // Collect builds a snapshot of the live server plus every pane's captured
 // scrollback. The returned warnings are non-fatal problems the caller
-// should surface (currently: panes whose capture-pane answered with a tmux
-// %error, e.g. because the pane vanished mid-save) — the snapshot is still
-// complete and worth keeping.
+// should surface (panes whose capture-pane answered with a tmux %error, e.g.
+// because the pane vanished mid-save, and malformed list-panes lines, whose
+// pane is left out — issue #55) — the snapshot is still worth keeping.
 func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string][]byte, []string, error) {
 	start := time.Now()
 	var warnings []string
@@ -203,27 +206,40 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 	}
 	var caps []capture
 	var resolveTotal time.Duration
+	// Issue #55: a pane line that can't be parsed costs exactly that pane —
+	// it is left out of the snapshot with a warning (which save records in
+	// the event detail) — never the whole save. One unparseable pane used to
+	// abort every autosave until someone noticed.
+	skip := func(field, l string) {
+		if field != "" {
+			field = " (" + field + ")"
+		}
+		warnings = append(warnings, fmt.Sprintf("malformed list-panes line%s, pane skipped: %q", field, l))
+	}
 	// Pass 2: no further appends happen to any se.Windows slice, so taking
 	// &se.Windows[pos] here is safe and stable for the rest of Collect.
 	for _, l := range paneLines {
 		// head = session_name, window_index, pane_index, pane_id,
 		// pane_active, pane_pid, pane_current_path, pane_title (pane_title
 		// absorbs any embedded tabs, since it is last of the 8); tail =
-		// history_size. Note: pane_current_path comes before pane_title, so
-		// a tab embedded in the path (not the title) would misparse — this
-		// is accepted per the task brief, since paths practically never
-		// contain tabs and title is the field most likely to carry
-		// arbitrary user text (e.g. unicode status glyphs, command lines).
-		head, tail, ok := splitTail(l, 1)
+		// pane_dead, pane_dead_status, pane_dead_signal, history_size. Note:
+		// pane_current_path comes before pane_title, so a tab embedded in the
+		// path (not the title) would misparse — this is accepted per the task
+		// brief, since paths practically never contain tabs and title is the
+		// field most likely to carry arbitrary user text (e.g. unicode status
+		// glyphs, command lines).
+		head, tail, ok := splitTail(l, 4)
 		if !ok {
-			return nil, nil, warnings, fmt.Errorf("malformed list-panes line: %q", l)
+			skip("", l)
+			continue
 		}
 		f := strings.SplitN(head, "\t", 8)
 		if len(f) != 8 {
-			return nil, nil, warnings, fmt.Errorf("malformed list-panes line: %q", l)
+			skip("", l)
+			continue
 		}
 		session, winIdxStr, paneIdxStr, paneID, paneActive, panePIDStr, cwd, title := f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]
-		histStr := tail[0]
+		dead, deadStatusStr, deadSignalStr, histStr := tail[0] == "1", tail[1], tail[2], tail[3]
 
 		se, ok := sessions[session]
 		if !ok {
@@ -236,25 +252,36 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 		w := &se.Windows[pos]
 		idx, err := strconv.Atoi(paneIdxStr)
 		if err != nil {
-			return nil, nil, warnings, fmt.Errorf("malformed list-panes line (pane_index): %q", l)
-		}
-		pid, err := strconv.Atoi(panePIDStr)
-		if err != nil {
-			return nil, nil, warnings, fmt.Errorf("malformed list-panes line (pane_pid): %q", l)
+			skip("pane_index", l)
+			continue
 		}
 		hist, err := strconv.Atoi(histStr)
 		if err != nil {
-			return nil, nil, warnings, fmt.Errorf("malformed list-panes line (history_size): %q", l)
+			skip("history_size", l)
+			continue
 		}
-		// The clock reads are behind trace.Enabled so the untraced path
-		// really is one bool test per pane, not two time.Now() syscalls.
-		var rs time.Time
-		if trace.Enabled {
-			rs = time.Now()
-		}
-		restore := procs.Resolve(c.Procs, c.Reg, pid, c.Allowlist)
-		if trace.Enabled {
-			resolveTotal += time.Since(rs)
+		var restore snapshot.Restore
+		if dead {
+			// Issue #55: the process is gone (pane_pid is empty), so there
+			// is nothing in /proc to resolve. The pane is restored dead,
+			// showing its output and exit status/signal.
+			restore = snapshot.Restore{Kind: snapshot.KindDead, ExitStatus: optInt(deadStatusStr), ExitSignal: optInt(deadSignalStr)}
+		} else {
+			pid, err := strconv.Atoi(panePIDStr)
+			if err != nil {
+				skip("pane_pid", l)
+				continue
+			}
+			// The clock reads are behind trace.Enabled so the untraced path
+			// really is one bool test per pane, not two time.Now() syscalls.
+			var rs time.Time
+			if trace.Enabled {
+				rs = time.Now()
+			}
+			restore = procs.Resolve(c.Procs, c.Reg, pid, c.Allowlist)
+			if trace.Enabled {
+				resolveTotal += time.Since(rs)
+			}
 		}
 		p := snapshot.Pane{
 			Index:        idx,
@@ -322,6 +349,17 @@ func (c *Collector) Collect(ctx context.Context) (*snapshot.Snapshot, map[string
 	p, w := snap.CountPanes()
 	snap.Stats = snapshot.Stats{Panes: p, Windows: w, Sessions: len(snap.Sessions), DurationMS: time.Since(start).Milliseconds()}
 	return snap, contents, warnings, nil
+}
+
+// optInt parses a tmux numeric format value that may legitimately be empty
+// (e.g. #{pane_dead_signal} for a pane that exited normally, or on tmux
+// <3.3 where the variable does not exist): empty or non-numeric → nil.
+func optInt(s string) *int {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return nil
+	}
+	return &n
 }
 
 // activeClientSession returns the session of the most-recently-active

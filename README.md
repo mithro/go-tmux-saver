@@ -100,6 +100,15 @@ split. Off by default; normal output is unchanged.
   editors, …) are relaunched in its panes and Claude panes get their
   claude-resume placeholder — kill the sandbox server to end them.
 
+  **Dead panes.** A pane whose process has exited but which tmux keeps
+  (`remain-on-exit`) is saved like any other — layout, output — plus its
+  exit status or signal, and restored *dead*: it shows its saved output
+  and tmux's "Pane is dead (status N …)" line, exactly as it was. It is
+  not relaunched and gets no shell; `respawn-pane` brings it back to life
+  as usual. (Only that pane gets `remain-on-exit`; your window/global
+  setting is untouched.) The replayed output includes the original "Pane
+  is dead" line with the original time, followed by a fresh one.
+
 - **Claude Code integration** — panes running [Claude
   Code](https://claude.com/claude-code) are saved as *which conversation
   they held* (detected via `/proc` + Claude's own session registry, id

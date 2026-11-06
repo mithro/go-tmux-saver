@@ -36,7 +36,8 @@ func Unchanged(a, b *snapshot.Snapshot) bool {
 }
 
 func restoreEqual(x, y snapshot.Restore) bool {
-	if x.Kind != y.Kind || x.ClaudeSession != y.ClaudeSession || len(x.Argv) != len(y.Argv) {
+	if x.Kind != y.Kind || x.ClaudeSession != y.ClaudeSession || len(x.Argv) != len(y.Argv) ||
+		!intPtrEqual(x.ExitStatus, y.ExitStatus) || !intPtrEqual(x.ExitSignal, y.ExitSignal) {
 		return false
 	}
 	for i := range x.Argv {
@@ -45,4 +46,13 @@ func restoreEqual(x, y snapshot.Restore) bool {
 		}
 	}
 	return true
+}
+
+// intPtrEqual compares optional ints by value: both nil, or both set and
+// equal.
+func intPtrEqual(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }

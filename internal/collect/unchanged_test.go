@@ -38,6 +38,34 @@ func TestUnchanged(t *testing.T) {
 	}
 }
 
+// TestUnchangedDeadPane covers issue #55: a pane dying is a change, and so is
+// a different exit status or signal (each is restored); an identical dead
+// pane is unchanged — its output can no longer change, so it hardlinks.
+func TestUnchangedDeadPane(t *testing.T) {
+	zero, one, nine := 0, 1, 9
+	dead := func(st, sig *int) *snapshot.Snapshot {
+		s := base()
+		s.Sessions[0].Windows[0].Panes[0].Restore = snapshot.Restore{Kind: snapshot.KindDead, ExitStatus: st, ExitSignal: sig}
+		return s
+	}
+	if Unchanged(base(), dead(&zero, nil)) {
+		t.Fatal("live → dead is a change")
+	}
+	if !Unchanged(dead(&zero, nil), dead(&zero, nil)) {
+		t.Fatal("identical dead panes are unchanged")
+	}
+	other := 0
+	if !Unchanged(dead(&zero, nil), dead(&other, nil)) {
+		t.Fatal("equal statuses behind different pointers are unchanged")
+	}
+	if Unchanged(dead(&zero, nil), dead(&one, nil)) {
+		t.Fatal("a different exit status is a change")
+	}
+	if Unchanged(dead(&zero, nil), dead(nil, &nine)) {
+		t.Fatal("exit status vs signal is a change")
+	}
+}
+
 // TestUnchangedAsymmetricClaudeTitle covers the issue-#8 gap from Task 10:
 // when only ONE side has a ✳ Claude summary title (Claude started or
 // exited between saves, the other side showing a plain shell title), that
